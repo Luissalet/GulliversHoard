@@ -6,6 +6,8 @@ Read this in English: [README.md](README.md).
 
 ![Maqueta](docs/screens/model.png)
 
+![Elegir la zona](docs/screens/new.png)
+
 ## Qué hace
 
 - **Elegir el sitio.** Buscas por nombre (Nominatim de OpenStreetMap) y mueves la zona en el mapa (arrastras el centro, cambias el tamaño desde la esquina, pulsas para recentrar). Mapas base: OpenStreetMap, OpenTopoMap, la ortofoto PNOA del IGN para España y un satélite mundial. Lo que queda fuera de la zona se oscurece y se dibujan los cortes entre piezas.
@@ -18,6 +20,7 @@ Read this in English: [README.md](README.md).
 - **Color.** En modo color el 3MF lleva una parte con nombre y color por filamento (Terreno, Edificios, Agua, Carreteras, Zonas verdes, Marco); encajan exactamente y los laminadores las importan como un objeto con partes. El STL es siempre la misma maqueta en una sola pieza cerrada.
 - **Vista 3D.** Órbita, planta y alzado, partes que se pueden ocultar y piezas que se separan.
 - **Biblioteca.** Cada maqueta guarda sus parámetros y sus últimas generaciones; editar, regenerar, duplicar, renombrar, exportar los archivos a una carpeta o enviarlos a Vulcan's Hoard (la biblioteca de impresión 3D de la familia). El ZIP de piezas lleva un `LEEME.txt` que explica cómo se montan las piezas y los pines y qué fuentes citar.
+- **Servidores de mapas saturados.** A los servidores públicos de OpenStreetMap se les pregunta en carrera escalonada y gana la primera respuesta buena; si todos están ocupados, la generación espera y lo vuelve a intentar. Las descargas se guardan en caché, así que regenerar con otros ajustes es rápido.
 - **Informe.** Escala, tamaño, volumen, gramos de PLA estimados, rango de relieve, edificios dibujados, triángulos, piezas que caben en la cama, la fuente de relieve y su resolución, y el texto de atribución.
 
 ## Arrancar

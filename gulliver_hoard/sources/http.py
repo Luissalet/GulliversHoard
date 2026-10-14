@@ -90,15 +90,25 @@ class Fetcher:
         hit = self.cached(bucket, key, ext, max_age_s)
         if hit is not None:
             return hit
+        # a whole-request deadline: some servers keep the connection alive with a trickle of bytes, so a read timeout
+        # alone would never fire
+        limit = timeout or self._timeout
+        deadline = time.monotonic() + limit
+        host = httpx.URL(url).host
         try:
             self.requests += 1
-            response = self.client().post(url, data=data, timeout=timeout or self._timeout)
+            with self.client().stream("POST", url, data=data, timeout=min(limit, 60.0)) as response:
+                if response.status_code >= 400:
+                    raise GulliverError("source_failed", f"{host} answered {response.status_code}.",
+                                        "The service may be busy; try again in a minute.", status_code=response.status_code)
+                chunks = []
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk)
+                    if time.monotonic() > deadline:
+                        raise GulliverError("source_failed", f"{host} took longer than {limit:g} s.", "The service may be busy.")
+                return b"".join(chunks)
         except httpx.HTTPError as exc:
-            raise GulliverError("unreachable", f"Could not reach {httpx.URL(url).host}: {exc}", "Check the internet connection and try again.") from exc
-        if response.status_code >= 400:
-            raise GulliverError("source_failed", f"{httpx.URL(url).host} answered {response.status_code}.",
-                                "The service may be busy; try again in a minute.", status_code=response.status_code)
-        return response.content
+            raise GulliverError("unreachable", f"Could not reach {host}: {exc}", "Check the internet connection and try again.") from exc
 
     def cache_size(self) -> dict[str, Any]:
         total = 0

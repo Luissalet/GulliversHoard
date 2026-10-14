@@ -255,6 +255,7 @@ aside .chip { white-space: normal; }
 .map-results button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; text-align: left; padding: 6px 9px; background: none; border: 0; border-radius: 6px; color: var(--ink); font: inherit; cursor: pointer; }
 .map-results button:hover, .map-results button:focus-visible { background: var(--hover); }
 .map-results .help { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.map-fit { position: absolute; z-index: 1000; top: 84px; left: 10px; background: var(--surface); box-shadow: 0 4px 14px #0008; }
 .map-layers { position: absolute; z-index: 1000; bottom: 28px; left: 12px; background: var(--surface); box-shadow: 0 6px 20px #0008; }
 .map-hint { position: absolute; z-index: 999; bottom: 28px; right: 12px; max-width: 320px; background: #000b; padding: 6px 9px; border-radius: 6px; font-size: 11.5px; }
 .gm-handle { border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 6px #000a; }
@@ -319,6 +320,7 @@ aside .chip { white-space: normal; }
 }
 @media (max-width: 767px) {
   .new-map { height: 52vh; }
-  .map-layers { bottom: 22px; }
+  .map-fit { position: absolute; z-index: 1000; top: 84px; left: 10px; background: var(--surface); box-shadow: 0 4px 14px #0008; }
+.map-layers { bottom: 22px; }
   .map-layers button { padding: 3px 7px; }
 }

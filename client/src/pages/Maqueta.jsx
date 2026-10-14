@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, fileUrl } from "../api.js";
 import { useApp } from "../context.js";
 import { Bar, Busy, ErrorBox, Icon, ICONS, Modal, Rel, useBusy, useLoad, useStored } from "../components/ui.jsx";
 import Viewer3D from "../components/Viewer3D.jsx";
-import { StatusChip } from "./Biblioteca.jsx";
+import { StatusChip, stepLabel } from "./Biblioteca.jsx";
 import { bytes, num } from "../format.js";
 
 const PART_ORDER = ["terrain", "buildings", "water", "roads", "green", "frame"];
@@ -105,12 +105,12 @@ export default function Maqueta({ param }) {
             <div className="flex items-center gap-2"><b className="flex-1">{job.state === "queued" ? t("queued") : t("building")}</b>
               <span className="help num">{Math.round((job.progress || 0) * 100)} %</span></div>
             <Bar value={job.progress || 0} alarm={false} />
-            <div className="help">{job.step}</div>
+            <div className="help">{stepLabel(t, job.step)}</div>
             <div className="flex gap-2">
               <Busy busy={busy.cancel} className="btn btn-sm" onClick={cancel}><Icon d={ICONS.stop} size={12} /> {t("cancel")}</Busy>
               <button type="button" className="btn btn-sm" onClick={() => setShowLog(!showLog)}>{showLog ? t("hide_log") : t("show_log")}</button>
             </div>
-            {showLog && jobLog?.log && <pre className="pre">{jobLog.log.join("\n")}</pre>}
+            {showLog && jobLog?.log && <LogBox lines={jobLog.log} />}
           </div>
         )}
         {m.status === "failed" && (
@@ -133,6 +133,7 @@ export default function Maqueta({ param }) {
               <div><span>{t("check")}</span><b className={report.check?.watertight ? "ok-text" : "warn-text"}>{report.check?.watertight ? t("watertight") : t("open_edges", { n: report.check?.open_edges })}</b></div>
             </div>
             {!report.fits_bed && !(report.tiles || []).length && <div className="banner banner-warn">{t("too_big_for_bed", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
+            {(report.tiles || []).some((x) => !x.fits_bed) && <div className="banner banner-warn">{t("tiles_too_big", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
 
             <section className="space-y-2">
               <h2>{t("downloads")}</h2>
@@ -157,7 +158,7 @@ export default function Maqueta({ param }) {
                       ))}
                     </tbody>
                   </table>
-                  {report.pins > 0 && <p className="help mt-2">{t("pins_note", { n: report.pins, d: m.params.pin_diameter_mm, l: num(2 * m.params.pin_depth_mm - 0.5, 1, lang) })}</p>}
+                  {report.pins > 0 && <p className="help mt-2">{t("pins_note", { n: report.pins, d: num(m.params.pin_diameter_mm, 1, lang), l: num(2 * m.params.pin_depth_mm - 0.5, 1, lang) })}</p>}
                 </details>
               )}
             </section>
@@ -195,6 +196,12 @@ export default function Maqueta({ param }) {
       {renameOpen && <RenameDialog model={m} onClose={() => setRenameOpen(false)} onDone={reload} />}
     </div>
   );
+}
+
+function LogBox({ lines }) {
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [lines]);
+  return <pre ref={ref} className="pre">{lines.join("\n")}</pre>;
 }
 
 function ExportDialog({ model, onClose }) {

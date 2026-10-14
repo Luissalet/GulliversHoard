@@ -81,5 +81,25 @@ def test_overpass_all_fail(tmp_path):
 
     f = Fetcher(tmp_path / "cache", transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html>rate limited</html>")))
     with pytest.raises(GulliverError) as err:
-        osm.fetch_raw(f, (-3.71, 40.41, -3.69, 40.43), ["https://a.example/api", "https://b.example/api"], stagger_s=0.1)
+        osm.fetch_raw(f, (-3.71, 40.41, -3.69, 40.43), ["https://a.example/api", "https://b.example/api"], stagger_s=0.1, rounds=2, pause_s=0.2)
     assert "a.example" in err.value.message and "b.example" in err.value.message
+
+
+def test_overpass_tries_again_after_a_busy_round(tmp_path):
+    import httpx
+
+    from gulliver_hoard.sources.http import Fetcher
+
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) <= 2:
+            return httpx.Response(504, text="busy")
+        return httpx.Response(200, content=b'{"elements": []}')
+
+    seen = []
+    f = Fetcher(tmp_path / "cache", transport=httpx.MockTransport(handler))
+    data = osm.fetch_raw(f, (-3.71, 40.41, -3.69, 40.43), ["https://a.example/api", "https://b.example/api"], progress=seen.append,
+                         stagger_s=0.1, pause_s=0.2)
+    assert data == {"elements": []} and any("trying again" in m for m in seen)

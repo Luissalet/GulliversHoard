@@ -52,7 +52,7 @@ class FakeSources:
         grid = DemGrid(data, "lonlat", (lons[0], lats[0]), step, source="demo", res_m=res, attribution="Demo data")
         return Composite(grid, None)
 
-    def osm(self, bbox, *, progress: Optional[Callable[[str], None]] = None, cancelled: Any = None) -> dict[str, Any]:
+    def osm(self, bbox, *, progress: Optional[Callable[[str], None]] = None, cancelled: Any = None, rounds: int = 3) -> dict[str, Any]:
         lon0, lat0 = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         proj = Projector(lon0, lat0)
         if progress:

@@ -51,7 +51,7 @@ export default function Biblioteca() {
                 {active && job && (
                   <div className="space-y-1">
                     <Bar value={job.progress || 0} alarm={false} thin />
-                    <div className="help trunc">{job.step || t("queued")}</div>
+                    <div className="help trunc">{job.step ? stepLabel(t, job.step) : t("queued")}</div>
                   </div>
                 )}
                 {!active && r.scale && (
@@ -75,4 +75,9 @@ export default function Biblioteca() {
 export function StatusChip({ status, t }) {
   const cls = { ready: "chip-ok", failed: "chip-danger", building: "chip-accent", queued: "chip-accent", draft: "" }[status] || "";
   return <span className={`chip ${cls}`}>{(status === "building" || status === "queued") && <span className="spinner spinner-xs" />}{t(`status_${status || "draft"}`)}</span>;
+}
+
+export function stepLabel(t, step) {
+  const key = `step_${String(step || "").split(":")[0]}`;
+  return t.has(key) ? t(key) + (String(step).includes(":") ? ":" + String(step).split(":").slice(1).join(":") : "") : step;
 }

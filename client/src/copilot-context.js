@@ -25,7 +25,8 @@ const pick = (source, keys) => Object.fromEntries(keys.filter((k) => source?.[k]
 export const modelObject = (m) => ({
   kind: "map-model", object_id: m.id, title: m.name || m.id,
   ...pick(m, ["status", "place", "preset", "error"]),
-  ...(m.report ? { scale: m.report.scale, size_mm: m.report.size_mm, tiles: Array.isArray(m.report.tiles) ? m.report.tiles.length : m.report.tiles } : {}),
+  ...(m.report ? { scale: m.report.scale, size_mm: m.report.size_mm, tiles: Array.isArray(m.report.tiles) ? m.report.tiles.length : m.report.tiles,
+    weight_g_pla: m.report.weight_g_pla, fits_bed: m.report.fits_bed, watertight: m.report.check?.watertight } : {}),
   ...(m.params ? { centre: [m.params.lon, m.params.lat], ground_m: [m.params.width_m, m.params.height_m], size_mm_param: m.params.size_mm, shape: m.params.shape } : {}),
 });
 

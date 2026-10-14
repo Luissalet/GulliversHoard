@@ -127,9 +127,15 @@ export default function Nueva({ query }) {
   const pick = (hit) => {
     const size = sizeOfBox(hit.bbox);
     const square = form.shape === "circle" || form.shape === "hexagon";
-    const w = square ? Math.max(size.width_m, size.height_m) : size.width_m;
-    set({ lon: round6(hit.lon), lat: round6(hit.lat), width_m: w, height_m: square ? w : size.height_m });
-    setFlyTo(hit.bbox);
+    // a whole municipality is far too big for a city model: keep the area at the scale the preset is made for
+    const limit = { city: 3000, landscape: 40000, relief: 60000 }[preset || "city"] || 3000;
+    const k = Math.min(1, limit / Math.max(size.width_m, size.height_m));
+    const r = (x) => (x > 5000 ? Math.round(x / 500) * 500 : Math.round(x / 50) * 50);
+    const w = r((square ? Math.max(size.width_m, size.height_m) : size.width_m) * k);
+    const h = square ? w : r(size.height_m * k);
+    const next = { lon: round6(hit.lon), lat: round6(hit.lat), width_m: w, height_m: h };
+    set(next);
+    setFlyTo(boxAround(next));
     setResults([]);
     setPlace(hit.name);
     if (!name || name === shortName(place)) setName(shortName(hit.name));
@@ -181,6 +187,9 @@ export default function Nueva({ query }) {
             <button key={k} type="button" aria-pressed={layer === k} onClick={() => setLayer(k)}>{t(`layer_${k}`)}</button>
           ))}
         </div>
+        <button type="button" className="btn btn-sm btn-icon map-fit" onClick={() => setFlyTo(boxAround(form))} aria-label={t("map_fit")} title={t("map_fit")}>
+          <Icon d={ICONS.target} size={15} />
+        </button>
         <MapPicker value={form} base={layer} flyTo={flyTo} onChange={set}
           labels={{ map: t("map_label"), move: t("map_move"), resize: t("map_resize") }} />
         <div className="map-hint help">{t("map_hint")}</div>

@@ -21,8 +21,9 @@ class Sources:
     def dem(self, bbox, want_res_m: float, *, prefer: str = "auto", progress: Optional[Callable[[str], None]] = None) -> Any:
         return _dem.fetch_dem(self.fetcher, bbox, want_res_m, prefer=prefer, progress=progress)
 
-    def osm(self, bbox, *, progress: Optional[Callable[[str], None]] = None, cancelled: Optional[Callable[[], bool]] = None) -> dict[str, Any]:
-        return _osm.fetch_raw(self.fetcher, bbox, self.overpass_servers, progress=progress, cancelled=cancelled)
+    def osm(self, bbox, *, progress: Optional[Callable[[str], None]] = None, cancelled: Optional[Callable[[], bool]] = None,
+            rounds: int = 3) -> dict[str, Any]:
+        return _osm.fetch_raw(self.fetcher, bbox, self.overpass_servers, progress=progress, cancelled=cancelled, rounds=rounds)
 
     def search(self, query: str, limit: int = 6, language: str = "es") -> list[dict[str, Any]]:
         return _geocode.search(self.fetcher, query, limit, language)

@@ -73,6 +73,7 @@ const D = {
   map_label: ["Mapa para elegir la zona", "Map to choose the area"],
   map_move: ["Arrastra para mover la zona", "Drag to move the area"],
   map_resize: ["Arrastra para cambiar el tamaño", "Drag to resize"],
+  map_fit: ["Encuadrar la zona", "Fit the area"],
   map_hint: ["Pulsa el mapa para centrar la zona; arrastra el punto central para moverla y la esquina para cambiar su tamaño.",
     "Click the map to centre the area; drag the centre point to move it and the corner to resize it."],
   g_area: ["Zona", "Area"],
@@ -161,6 +162,22 @@ const D = {
   features_line: ["{b} edificios, {r} calles, {w} km² de agua, {g} km² de zonas verdes.", "{b} buildings, {r} streets, {w} km² of water, {g} km² of green."],
   landmarks: ["Destacados", "Landmarks"],
 
+  // build steps (the job's step names)
+  "step_Elevation": ["Relieve", "Elevation"],
+  "step_OpenStreetMap": ["Datos de OpenStreetMap", "OpenStreetMap data"],
+  "step_Roads and contour lines": ["Calles y curvas de nivel", "Streets and contour lines"],
+  "step_Terrain solid": ["Sólido del terreno", "Terrain solid"],
+  "step_Water": ["Agua", "Water"],
+  "step_Buildings": ["Edificios", "Buildings"],
+  "step_Parts": ["Partes de color", "Colour parts"],
+  "step_Tiles": ["Piezas y pines", "Tiles and pins"],
+  "step_Checks": ["Comprobaciones", "Checks"],
+  "step_Done": ["Terminado", "Done"],
+  "step_Files": ["Archivos", "Files"],
+  "step_Preview": ["Vista previa", "Preview"],
+  "step_Cancelled": ["Cancelado", "Cancelled"],
+  "step_Ready": ["Lista", "Ready"],
+
   // model
   viewer_label: ["Vista 3D de {name}", "3D view of {name}"],
   loading_3d: ["Cargando la vista 3D…", "Loading the 3D view…"],
@@ -184,6 +201,7 @@ const D = {
   watertight: ["Cerrada", "Watertight"],
   open_edges: ["{n} aristas abiertas", "{n} open edges"],
   too_big_for_bed: ["No cabe en la cama de {x} × {y} mm: edítala y pártela en piezas.", "It does not fit the {x} × {y} mm bed: edit it and split it into tiles."],
+  tiles_too_big: ["Hay piezas que no caben en la cama de {x} × {y} mm: edita la maqueta y pártela en más piezas.", "Some tiles do not fit the {x} × {y} mm bed: edit the model and split it into more tiles."],
   downloads: ["Descargas", "Downloads"],
   dl_3mf: ["por colores, para el laminador", "by colour, for the slicer"],
   dl_stl: ["una pieza", "one piece"],

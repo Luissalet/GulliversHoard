@@ -138,9 +138,11 @@ def _answer(body: bytes) -> tuple[Optional[dict[str, Any]], str]:
 
 def fetch_raw(fetcher: Fetcher, bbox: tuple[float, float, float, float], servers: Iterable[str] = DEFAULT_SERVERS,
               progress: Optional[Callable[[str], None]] = None, max_age_days: float = 30.0,
-              cancelled: Optional[Callable[[], bool]] = None, stagger_s: float = STAGGER_S) -> dict[str, Any]:
+              cancelled: Optional[Callable[[], bool]] = None, stagger_s: float = STAGGER_S, rounds: int = 3,
+              pause_s: float = 15.0) -> dict[str, Any]:
     """The Overpass answer for the area. Public servers are often busy: the first one is asked at once and, while none
-    has answered, another is added every ``stagger_s`` seconds (or as soon as one fails); the first good answer wins."""
+    has answered, another is added every ``stagger_s`` seconds (or as soon as one fails); the first good answer wins.
+    When every server fails, the round is repeated after ``pause_s`` (``rounds`` in all)."""
     query = build_query(bbox)
     cache_key = "overpass\n" + query
     hit = fetcher.cached("overpass", cache_key, ".json", max_age_days * 86400)
@@ -148,14 +150,36 @@ def fetch_raw(fetcher: Fetcher, bbox: tuple[float, float, float, float], servers
         if progress:
             progress("OpenStreetMap: from the cache")
         return json.loads(hit)
-    pending = list(servers)
-    if not pending:
+    servers = list(servers)
+    if not servers:
         raise GulliverError("invalid", "No Overpass server is configured.", "Add one in the settings.")
+    last: Optional[GulliverError] = None
+    for attempt in range(max(1, rounds)):
+        if attempt:
+            if progress:
+                progress(f"OpenStreetMap: every server is busy, trying again in {pause_s:g} s ({attempt + 1}/{rounds})")
+            end = time.monotonic() + pause_s
+            while time.monotonic() < end:
+                if cancelled and cancelled():
+                    from ..errors import Cancelled
+                    raise Cancelled()
+                time.sleep(0.2)
+        try:
+            return _race(fetcher, query, cache_key, servers, progress, cancelled, stagger_s)
+        except GulliverError as exc:
+            last = exc
+    assert last is not None
+    raise last
+
+
+def _race(fetcher: Fetcher, query: str, cache_key: str, servers: list[str], progress: Optional[Callable[[str], None]],
+          cancelled: Optional[Callable[[], bool]], stagger_s: float) -> dict[str, Any]:
+    pending = list(servers)
     answers: "queue.Queue[tuple[str, Optional[bytes], str]]" = queue.Queue()
 
     def ask(url: str) -> None:
         try:
-            answers.put((url, fetcher.post_form(url, {"data": query}, bucket="overpass", cache_key=cache_key + url, timeout=240), ""))
+            answers.put((url, fetcher.post_form(url, {"data": query}, bucket="overpass", cache_key=cache_key + url, timeout=200), ""))
         except GulliverError as exc:
             answers.put((url, None, exc.message))
         except Exception as exc:  # noqa: BLE001 - any failure of one server just moves on to the next

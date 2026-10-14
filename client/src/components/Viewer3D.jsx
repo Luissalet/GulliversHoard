@@ -109,7 +109,7 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
       });
       s.current.groups = groupInfo;
       s.current.centre = centre;
-      s.current.size = Math.max(size.x, size.z, 1);
+      s.current.size = Math.max(Math.hypot(size.x, size.z), 1);   // the diagonal: what an oblique view has to fit
       s.current.modelCentre = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
       setCamera(view);
       applyHidden(hidden);
@@ -142,7 +142,7 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
       const dx = c.x - modelCentre.x;
       const dz = c.z - modelCentre.z;
       const len = Math.hypot(dx, dz) || 1;
-      const k = amount * size * 0.12;
+      const k = amount * size * 0.085;
       g.position.set((dx / len) * k, -(dz / len) * k, 0);
     }
   }
@@ -150,10 +150,12 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
   function setCamera(v) {
     const { camera, controls, centre, size } = s.current;
     if (!camera) return;
-    const d = size * 1.25;
-    if (v === "top") camera.position.set(centre.x, centre.y + d * 1.45, centre.z + 0.001);
-    else if (v === "front") camera.position.set(centre.x, centre.y + d * 0.25, centre.z + d * 1.35);
-    else camera.position.set(centre.x - d * 0.55, centre.y + d * 0.9, centre.z + d * 1.0);
+    // distance that fits the model's longest side in the view (narrow views need more room)
+    const fov = (camera.fov * Math.PI) / 180;
+    const d = ((size / 2) / Math.tan(fov / 2)) * 1.08 / Math.min(1, Math.max(camera.aspect, 0.45));
+    if (v === "top") camera.position.set(centre.x, centre.y + d, centre.z + 0.001);
+    else if (v === "front") camera.position.set(centre.x, centre.y + d * 0.3, centre.z + d * 0.95);
+    else camera.position.set(centre.x - d * 0.42, centre.y + d * 0.68, centre.z + d * 0.74);
     controls.target.copy(centre);
     controls.update();
   }

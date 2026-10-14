@@ -157,7 +157,7 @@ class Services:
         }
         if fetch:
             pad = 3 * params.cell_ground_m + 30.0
-            raw = self.sources.osm(params.area.bbox_padded(pad))
+            raw = self.sources.osm(params.area.bbox_padded(pad), rounds=1)
             feats = osm_mod.parse(raw, params.area.projector, params.width_m, params.height_m, pad_m=pad)
             out["features"] = feats.summary()
         return out

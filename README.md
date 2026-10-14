@@ -6,6 +6,8 @@ Lea esto en español: [README.es.md](README.es.md).
 
 ![Model](docs/screens/model.png)
 
+![Choosing the area](docs/screens/new.png)
+
 ## What it does
 
 - **Choose the place.** Search by name (OpenStreetMap's Nominatim), then move the area on the map (drag the centre, resize from the corner, click to recentre). Base maps: OpenStreetMap, OpenTopoMap, the IGN PNOA aerial photo for Spain and a world satellite layer. Everything outside the area is dimmed and the tile seams are drawn on it.
@@ -18,6 +20,7 @@ Lea esto en español: [README.es.md](README.es.md).
 - **Colour.** In colour mode the 3MF has one named, coloured part per filament (Terreno, Edificios, Agua, Carreteras, Zonas verdes, Marco); the parts fit each other exactly and slicers import them as one object with parts. The STL is always the same model in one closed piece.
 - **3D preview.** Orbit, top and front views, parts that can be hidden, and tiles that can be pulled apart.
 - **Library.** Every model keeps its parameters and its last builds; edit, rebuild, duplicate, rename, export the files to a folder, or send them to Vulcan's Hoard (the 3D print library of the family). The tiles ZIP carries a `LEEME.txt` that says how the tiles and pins go together and which sources to credit.
+- **Busy map servers.** The public OpenStreetMap servers are asked in a staggered race and the first good answer wins; when all of them are busy the build waits and tries again. Downloads are cached, so rebuilding with other settings is quick.
 - **Report.** Scale, size, solid volume, an estimate of PLA grams, relief range, buildings drawn, triangles, tiles that fit the bed, the elevation source and its resolution, and the attribution text.
 
 ## Running
