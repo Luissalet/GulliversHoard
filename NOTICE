@@ -1,0 +1,8 @@
+Gulliver's Hoard builds models from open data. Credit these sources when you share a model or a print:
+
+- Map data (buildings, water, streets, railways, green areas, place search):
+  © OpenStreetMap contributors, available under the Open Database Licence (ODbL) — https://www.openstreetmap.org/copyright
+- Elevation in Spain: Modelo Digital del Terreno © Instituto Geográfico Nacional de España, CC BY 4.0 — https://www.ign.es
+- Elevation elsewhere: Terrain Tiles (Mapzen / Amazon Web Services Open Data), built from SRTM, EU-DEM, USGS 3DEP,
+  ETOPO1 and other sources, each under its own terms — https://registry.opendata.aws/terrain-tiles/
+- Base maps shown in the interface (display only): OpenStreetMap, OpenTopoMap (CC-BY-SA), PNOA © IGN España, Esri World Imagery.

@@ -1,0 +1,34 @@
+# Architecture
+
+```
+browser / MCP bridge / Faustus / Hoard Hub
+        │  HTTP (127.0.0.1:5206)
+        ▼
+  main.py ─ api/ui.py (/api/ui/call, files, events, /api/models) ─ api/agent.py (Bearer, MCP)
+        │
+  agent_tools.py ── one catalogue of 20 tools (pydantic arguments)
+        │
+  services.py ── Settings · Sources · Projects · Jobs · area_check · export · Vulcan
+        │
+  jobs.py ── one worker thread ── mesh/build.py ── outputs.py (STL, 3MF, tiles, GLB, thumbnail, report)
+        │                              │
+  sources/ (http cache, dem, osm, geocode, fake)   mesh/solids.py (manifold3d)
+```
+
+- **params.py**: `ModelParams`, the one validated object that decides a model (centre, ground size, shape, print size, base, exaggerations, resolution, layers, roads, contours, frame, label, tiles and pins, colour mode, elevation source), the three presets and the derived values (scale, model size, cell size on the ground, road rank by scale, automatic contour interval, tile size). `MAX_CELLS` (3 million) bounds the terrain grid.
+- **geo.py**: a local projection around the centre with the WGS84 radii of curvature (error far below a millimetre of model for areas of tens of km); `Area` (centre + metres) and its boxes.
+- **sources/http.py**: `Fetcher`, an httpx client with an on-disk cache (`data/cache/<bucket>/<sha>`) keyed by the request: Terrarium tiles and IGN rasters forever, Overpass answers 30 days, place searches 90 days.
+- **sources/dem.py**: `DemGrid` (raster + pixel mapping, mercator or lon/lat, bilinear sampling) and `Composite` (fills the primary's no-data from a fallback). IGN: WCS 2.0.1 `GetCoverage` of `Elevacion4258_{5,25,200}`, split in requests of at most 1800 px a side, mosaicked, no-data below −1000; coverage chosen as the coarsest grid not coarser than the model cell (and at most 5400 px a side). Terrarium: the zoom whose pixel is just finer than the model cell, at most 144 tiles.
+- **sources/osm.py**: one Overpass query (`out geom`) for buildings, water areas, waterways, highways, railways and green areas; servers tried in order. `parse` projects everything to metres, stitches multipolygon members into rings (outer united, inner cut), skips building ways that belong to a building relation, reads heights (`height`, `building:height`, levels + half the roof levels, or the type), road widths (`width`, lanes × 3.3 m or the class), bridges and tunnels, and returns `Features`.
+- **sources/fake.py**: the invented town for `GULLIVER_FAKE=1` and the tests, in the Overpass format, laid out around any centre.
+- **mesh/build.py**: `build(params, sources)` → `BuildResult`. Steps: elevation grid (`resolution_mm` cells, smoothed by about 0.45 × source resolution / cell), sea (≤ 0.3 m and connected to the border), Z in mm (`base + (elev − ref) × scale × z_exag`), roads and rails buffered by their widths and engraved or raised in the grid, contour lines (grid edges where `floor(elev / interval)` changes, widened to ~0.45 mm), the terrain solid (`solids.heightfield`), water (one prism of the whole outline intersected with per-piece slabs: pieces of 300 m of ground, level = lowest bare terrain inside), bridges over water (flat decks from z 0 to the higher end), buildings (simplified, grown 0.02 mm so neighbours overlap instead of touching, from 0.3 mm under the lowest ground point to the highest + height). Colour mode: each layer is the top 0.6 mm of the terrain inside its outline (`cutter = prism − lowered terrain`; `layer = terrain ∩ cutter`, `terrain −= cutter`), streets and green stop 0.05 mm short of the banks and of each other; a one-piece twin (`_single`) follows every later step for the STL. Then the outline shape (intersection with its prism), the frame (a prism around the outline; the copy used in unions reaches 0.05 mm inside), the text under the model (Pillow renders it, `mask_to_polygons` turns the pixels into polygons, mirrored), tiles (intersection with each tile's box) with pin holes (horizontal cylinders across each seam, every ~45 mm where the footprint allows) and the tile letter under each tile.
+- **mesh/solids.py**: the heightfield solid (top grid with alternating diagonals, four walls, a fan bottom), prisms from shapely polygons (`CrossSection`, even-odd), outline shapes, text, tiles, pins, `clean` (drops zero-volume slivers) and `mesh_arrays` (welds vertices that fall on the same float32 position and drops collapsed faces, so the files are closed for slicers too).
+- **mesh/export.py**: binary STL; 3MF (core spec: `basematerials` with the part colours, one mesh object per part, an assembly object of components, metadata, thumbnail); GLB through trimesh (nodes `<tile>__<part>`, simplified past 1.6 M triangles); the top-view thumbnail (hillshade + layers + buildings with a shadow, cut to the outline).
+- **outputs.py**: writes a build folder (`data/projects/<id>/builds/<build>/`): `<slug>.stl`, `<slug>.3mf`, `tiles/<slug>-<id>.{stl,3mf}`, `<slug>-tiles.zip` (with `LEEME.txt`), `preview.glb`, `thumb.png` and `report.json` (stats, parts, tiles with sizes, fit to the bed and their own check, file sizes, notes, attribution).
+- **projects.py**: `project.json` per model (params, status, the current build and its summary, the builds kept), pruning to `keep_builds`; files are served only from the current build and only by a relative name.
+- **jobs.py**: one worker thread; `Job.report(fraction, step)` feeds the progress and the log; cancel is checked between steps; `jobs.json` keeps the last 200 (running ones become `lost` after a restart).
+- **services.py**: glue for the tools and routes: `make_params` (defaults + preset + values, or a patch over a stored model), `area_check`, create/update/build/delete, files, export to a folder, Vulcan through `family.call`, cache, and the family events (`gulliver.model.created`, `gulliver.model.ready`, `gulliver.export.done`).
+
+Data folder (`data/`): `settings.json`, `jobs.json`, `projects/<id>/project.json`, `projects/<id>/builds/<build>/…`, `cache/{terrarium,ign,overpass,nominatim}`, `mcp-token`, `logs/`.
+
+Interface (`client/`, React + Vite + Tailwind, the shared Hoard theme with the `gulliver` palette): `#/` library, `#/nueva` (and `#/nueva?edit=<id>`) map + parameters with the live `area_check`, `#/m/<id>` the 3D viewer (three.js, GLTFLoader, OrbitControls; Z-up model rotated into three's Y-up) and the report, `#/ajustes` settings. `copilot-context.js` is what the shared Faustus panel reads.
