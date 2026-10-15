@@ -110,3 +110,15 @@ def test_overpass_tries_again_after_a_busy_round(tmp_path):
     data = osm.fetch_raw(f, (-3.71, 40.41, -3.69, 40.43), ["https://a.example/api", "https://b.example/api"], progress=seen.append,
                          stagger_s=0.1, pause_s=0.2)
     assert data == {"elements": []} and any("trying again" in m for m in seen)
+
+
+def test_hard_sports_grounds_are_plazas_and_piers_are_read():
+    assert osm._is_plaza({"leisure": "pitch", "surface": "clay"}) and osm._is_plaza({"leisure": "track"})
+    assert not osm._is_plaza({"leisure": "pitch", "surface": "grass"})
+    proj = Projector(-3.7, 40.42)
+    pts = [proj.inv(x, 0.0) for x in (0.0, 50.0)]
+    data = {"elements": [{"type": "way", "id": 1, "tags": {"man_made": "pier"},
+                          "geometry": [{"lon": lo, "lat": la} for lo, la in pts]}]}
+    f = osm.parse(data, proj, 400, 400)
+    assert len(f.piers) == 1 and f.piers[0][1] == "pier" and f.summary()["piers"] == 1
+    assert 'man_made"~"^(pier|breakwater|groyne)$"' in osm.build_query((0, 0, 1, 1))

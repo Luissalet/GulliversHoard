@@ -18,7 +18,7 @@ from .geo import format_coord, nice_scale
 from .hoard_link import family
 from .hoard_link.tokens import read_or_create_token
 from .jobs import Job, Jobs
-from .mesh.build import PART_COLORS, PART_LABELS, build
+from .mesh.build import PALETTES, PART_COLORS, PART_LABELS, build
 from .worker import run_isolated
 from .outputs import write_outputs
 from .params import MAX_CELLS, PRESETS, ModelParams, suggest_tiles, NULLABLE
@@ -323,7 +323,8 @@ class Services:
 
     def presets(self) -> dict[str, Any]:
         return {"presets": PRESETS, "defaults": ModelParams(lon=0, lat=0).model_dump(exclude={"lon", "lat"}),
-                "parts": {n: {"color": PART_COLORS[n], "label_es": PART_LABELS[n][0], "label_en": PART_LABELS[n][1]} for n in PART_COLORS}}
+                "parts": {n: {"color": PART_COLORS[n], "label_es": PART_LABELS[n][0], "label_en": PART_LABELS[n][1]} for n in PART_COLORS},
+                "palettes": PALETTES}
 
     def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         out = self.settings.update(changes)

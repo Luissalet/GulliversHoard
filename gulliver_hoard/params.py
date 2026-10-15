@@ -20,6 +20,7 @@ BuildingSource = Literal["auto", "osm", "cadastre"]
 TreeSource = Literal["auto", "osm"]
 DemSource = Literal["auto", "ign", "terrarium"]
 FrameStyle = Literal["flat", "bevel", "step"]
+Palette = Literal["classic", "sand", "grey", "white", "alpine"]
 TileCuts = Literal["straight", "streets"]
 
 
@@ -95,6 +96,13 @@ class ModelParams(BaseModel):
     frame_mm: float = Field(0.0, ge=0, le=40, description="Width of a raised frame around the model (0 = none).")
     label: str = Field("", max_length=80, description="Text engraved on the bottom; empty = name, coordinates and scale.")
     label_bottom: bool = True
+    water_lines: int = Field(0, ge=0, le=6, description="Thin lines engraved in the water following the shore of lakes and the sea "
+                             "(0 = none), like depth lines on a chart (colour mode).")
+    tall_buildings_m: float = Field(0.0, ge=0, le=600, description="Buildings at least this tall (m) are a part of their own, "
+                                    "'Towers', in a colour of their own (0 = off).")
+    palette: Palette = Field("classic", description="Colours of the parts: classic (muted map), sand (sand ground, white streets "
+                             "and buildings, bright green), grey (dark grey ground, white streets and buildings), white (all "
+                             "white but the water), alpine (bright meadows, dark rock, white snow).")
     frame_style: FrameStyle = Field("flat", description="flat: a plain raised band; bevel: its outer edge chamfered; step: a lower "
                                                         "outer ledge and a higher inner rim.")
     plaque: bool = Field(False, description="Raised plaque on the south side of the frame: title, coordinates and scale, a north "
@@ -202,10 +210,11 @@ class ModelParams(BaseModel):
 
 PRESETS = {
     "city": {"size_mm": 180.0, "z_exag": 1.5, "building_exag": 1.0, "buildings": True, "roads": "engraved", "road_detail": "auto",
-             "contours_m": 0.0, "green": True, "water": True, "rails": True, "resolution_mm": 0.3, "trees": True, "roofs": "auto"},
+             "contours_m": 0.0, "green": True, "water": True, "rails": True, "resolution_mm": 0.3, "trees": True, "roofs": "auto",
+             "palette": "sand", "water_lines": 2},
     "landscape": {"size_mm": 200.0, "building_exag": 1.0, "buildings": False, "roads": "engraved", "road_detail": "main",
                   "contours_m": -1.0, "green": True, "water": True, "rails": False, "resolution_mm": 0.4, "trees": True,
-                  "zones": True, "paths": True, "meadows": True, "z_exag": 1.5},
+                  "zones": True, "paths": True, "meadows": True, "z_exag": 1.5, "palette": "alpine", "water_lines": 3},
     "relief": {"size_mm": 200.0, "z_exag": 2.5, "buildings": False, "roads": "none", "contours_m": 0.0, "green": False,
                "water": True, "waterways": True, "rails": False, "color": "mono", "resolution_mm": 0.35, "trees": False,
                "zones": False},

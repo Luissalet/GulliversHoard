@@ -75,9 +75,10 @@ def _mesh_xml(solid: Any) -> str:
 
 
 def threemf_bytes(parts: dict[str, Any], *, title: str = "", lang: int = 0, thumbnail: Optional[bytes] = None,
-                  metadata: Optional[dict[str, str]] = None) -> bytes:
+                  metadata: Optional[dict[str, str]] = None, colors: Optional[dict[str, str]] = None) -> bytes:
+    colors = colors or PART_COLORS
     names = [n for n, m in parts.items() if m is not None and not m.is_empty()]
-    mats = "".join(f'<base name="{_xml_escape(PART_LABELS.get(n, (n, n))[lang])}" displaycolor="{PART_COLORS.get(n, "#CCCCCC")}FF"/>'
+    mats = "".join(f'<base name="{_xml_escape(PART_LABELS.get(n, (n, n))[lang])}" displaycolor="{colors.get(n, "#CCCCCC")}FF"/>'
                    for n in names)
     objects = []
     for idx, n in enumerate(names):
@@ -104,7 +105,8 @@ def threemf_bytes(parts: dict[str, Any], *, title: str = "", lang: int = 0, thum
 
 
 # -- GLB (preview) ----------------------------------------------------------------------------------------------------------
-def glb_bytes(groups: list[tuple[str, dict[str, Any]]], *, max_triangles: int = 1_200_000) -> bytes:
+def glb_bytes(groups: list[tuple[str, dict[str, Any]]], *, max_triangles: int = 1_200_000,
+              colors: Optional[dict[str, str]] = None) -> bytes:
     """``groups``: [(group name, {part name: Manifold})] -> one GLB with a node per group/part, coloured per part.
     Parts are simplified when the whole preview would exceed ``max_triangles``."""
     import trimesh
@@ -120,7 +122,7 @@ def glb_bytes(groups: list[tuple[str, dict[str, Any]]], *, max_triangles: int = 
                 continue
             m = solid.simplify(tolerance) if tolerance else solid
             verts, tris = S.mesh_arrays(m)
-            color = PART_COLORS.get(name, "#CCCCCC")
+            color = (colors or PART_COLORS).get(name, "#CCCCCC")
             rgba = [int(color[i:i + 2], 16) for i in (1, 3, 5)] + [255]
             mesh = trimesh.Trimesh(vertices=verts.astype(np.float64), faces=tris.astype(np.int64), process=False)
             mesh.visual = trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(
@@ -136,6 +138,7 @@ def _hex(c: str) -> tuple[int, int, int]:
 
 def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     """Top view: hillshaded terrain coloured by layer, buildings drawn with a shadow, the outline shape cut out."""
+    C = {**PART_COLORS, **(getattr(result, "colors", None) or {})}
     Z, xs, ys = result.Z, result.xs, result.ys
     W, H = xs[-1], ys[-1]
     outline = result.footprints.get("outline")
@@ -151,8 +154,8 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     shade = np.sin(alt) * np.sin(slope) + np.cos(alt) * np.cos(slope) * np.cos(az - aspect)
     shade = np.clip(1.0 + 1.1 * (shade - np.sin(alt)), 0.45, 1.25)      # flat ground keeps its colour
     rgb = np.empty(Z.shape + (3,), dtype=np.float32)
-    rgb[:] = _hex(PART_COLORS["terrain"])
-    for layer, color in (("water", PART_COLORS["water"]), ("roads", "#F7F4EE")):
+    rgb[:] = _hex(C["terrain"])
+    for layer, color in (("water", C["water"]), ("roads", "#F7F4EE" if C["roads"] == PART_COLORS["roads"] else C["roads"])):
         m = result.masks.get(layer)
         if m is not None and m.shape == Z.shape:
             rgb[m] = _hex(color)
@@ -188,28 +191,28 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     model = result.footprints.get("model")
     if outline is not None and model is not None and outline.area > model.area * 1.001:
-        canvas.paste(Image.new("RGBA", (w, h), _hex(PART_COLORS["frame"]) + (255,)), (0, 0), poly_mask(outline))
+        canvas.paste(Image.new("RGBA", (w, h), _hex(C["frame"]) + (255,)), (0, 0), poly_mask(outline))
     layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     layer.paste(img, (gx0, gy0))
     draw = ImageDraw.Draw(layer, "RGBA")
     green = result.footprints.get("green")
     if green is not None and result.params.green:
         for poly in S.polygons(green):
-            draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS["green"]) + (150,))
+            draw.polygon(px(poly.exterior.coords), fill=_hex(C["green"]) + (150,))
     for name, alpha in (("rock", 200), ("snow", 235), ("rails", 255)):
         geom = result.footprints.get(name)
         for poly in S.polygons(geom) if geom is not None else []:
-            draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS[name]) + (alpha,))
+            draw.polygon(px(poly.exterior.coords), fill=_hex(C[name]) + (alpha,))
     paths = result.footprints.get("paths")
     for poly in S.polygons(paths) if paths is not None else []:
-        draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS["terrain"]) + (230,))
+        draw.polygon(px(poly.exterior.coords), fill=_hex(C["terrain"]) + (230,))
     arr = np.asarray(layer).astype(np.float32)
     arr[..., :3] *= shade_px[..., None]
     layer = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA")
     draw = ImageDraw.Draw(layer, "RGBA")
     trees = result.footprints.get("trees")
     if trees is not None:
-        tc = _hex(PART_COLORS["trees"])
+        tc = _hex(C["trees"])
         for (x, y), r in zip(*trees):
             (cx, cy), rr = px([(x, y)])[0], max(0.8, r * scale)
             draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=tc + (225,))
@@ -218,7 +221,7 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
         for poly in S.polygons(shape):
             pts = px(poly.exterior.coords)
             draw.polygon([(x + off, y + off) for x, y in pts], fill=(40, 34, 28, 110))
-            draw.polygon(pts, fill=_hex(PART_COLORS["buildings"]) + (255,), outline=(150, 140, 125, 255))
+            draw.polygon(pts, fill=_hex(C["buildings"]) + (255,), outline=(150, 140, 125, 255))
     canvas.paste(layer, (0, 0), poly_mask(model if model is not None else outline))
     out = io.BytesIO()
     canvas.save(out, "PNG", optimize=True)

@@ -58,7 +58,34 @@ PART_COLORS = {
     "rock": "#9A968F",
     "snow": "#F7F7F4",
     "frame": "#3A3A3A",
+    "towers": "#9CC6E0",
 }
+# Palettes: the colour of every part, as the slicer and the viewer show it (the filaments are still chosen in the slicer).
+# classic: the original muted map; sand: warm sand ground, white streets and buildings, bright green, light blue water;
+# grey: dark grey ground under white streets and buildings; white: everything white but the water; alpine: bright
+# meadows, dark grey rock and white snow for mountains.
+_WHITE = "#F3F1EC"
+PALETTES: dict[str, dict[str, str]] = {
+    "classic": dict(PART_COLORS),
+    "sand": {**PART_COLORS, "terrain": "#D9BC8C", "buildings": "#F4F1EA", "water": "#8FCFE6", "roads": "#FAF8F2",
+             "rails": "#E6E1D8", "green": "#4FB062", "fields": "#8CC56E", "trees": "#2F8A3E", "plazas": "#E9D9B8",
+             "rock": "#8E8E8E", "snow": "#FAFAFA", "frame": "#1C1C1C", "plaque": "#F4F1EA", "towers": "#8FC9E8"},
+    "grey": {**PART_COLORS, "terrain": "#6B6B6B", "buildings": "#F2F0EC", "water": "#8FCFE6", "roads": "#F2F0EC",
+             "rails": "#D9D9D9", "green": "#3E9E52", "fields": "#7DB868", "trees": "#2E7D3C", "plazas": "#9A9A9A",
+             "rock": "#8A8A8A", "snow": "#FAFAFA", "frame": "#EDEBE6", "plaque": "#2F2B27", "towers": "#8FC9E8"},
+    "white": {**{k: _WHITE for k in PART_COLORS}, "water": "#79C4E0", "track": "#D2462D", "highlight": "#D4A017",
+              "plaque": "#1C1C1C", "frame": "#1C1C1C", "towers": _WHITE},
+    "alpine": {**PART_COLORS, "terrain": "#B7A98E", "buildings": "#F4F1EA", "water": "#57B6E0", "roads": "#FAF8F2",
+               "green": "#2DBE5A", "fields": "#7CCB6A", "trees": "#1F7A35", "rock": "#5E5E5E", "snow": "#FFFFFF",
+               "frame": "#1C1C1C", "towers": "#8FC9E8"},
+}
+
+
+def palette_colors(name: str) -> dict[str, str]:
+    """The colour of every part in a palette (unknown names fall back to the classic one)."""
+    return dict(PALETTES.get(name) or PALETTES["classic"])
+
+
 PART_LABELS = {
     "terrain": ("Terreno", "Terrain"),
     "buildings": ("Edificios", "Buildings"),
@@ -75,22 +102,30 @@ PART_LABELS = {
     "rock": ("Roca", "Rock"),
     "snow": ("Nieve", "Snow"),
     "frame": ("Marco", "Frame"),
+    "towers": ("Torres", "Towers"),
 }
 SKIN_MM = 0.6                 # thickness of a colour layer on top of the terrain
 BRIDGE_DECK_MM = 0.5          # thickness of a bridge deck over its arches
 OVERPASS_DECK_MM = 0.35       # a bridge off the water (over a street, a railway) is thinner: the clearance under it is small
 OVERPASS_DIP_MM = 0.15        # ...and drawn when the ground under it is at least its thickness plus this below the deck
-WEIR = {"weir": (0.4, 3.0, 0.25), "dam": (0.6, 8.0, 0.6)}   # kind -> (narrowest mm, real width m, top above the water mm)
+# structures across or into the water: kind -> (narrowest mm, real width m, top above the water mm)
+WEIR = {"weir": (0.4, 3.0, 0.25), "dam": (0.6, 8.0, 0.6),
+        "pier": (0.4, 4.0, 0.4), "breakwater": (0.6, 10.0, 0.6), "groyne": (0.4, 4.0, 0.3)}
 ROAD_GAP_MM = 0.18            # ground narrower than twice this between two roads becomes road
 ROAD_ISLAND_MM2 = 0.8         # traffic islands smaller than this become road
 MIN_BUILDING_ABS_MM2 = 0.06   # below this a building is never drawn, whatever block it belongs to
 CONTOUR_MM = 0.5              # width of an engraved contour line
+WATER_LINE_MM = 0.25          # shore lines in the water: width,
+WATER_LINE_DEPTH_MM = 0.15    # depth,
+WATER_LINE_FIRST_MM = 0.7     # distance of the first one from the shore,
+WATER_LINE_STEP_MM = 0.8      # and between the next ones;
+WATER_LINE_WIDE_MM = 2.5      # only in water at least twice this wide
 PATH_KINDS = {"footway", "path", "cycleway", "steps", "bridleway", "track", "pedestrian"}
 WATER_REACH_M = 150.0         # the water level at a point is never above the lowest ground this far along the water
 LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
-STAGE_VERSION = 4             # bump when the gathered map data changes shape
+STAGE_VERSION = 5             # bump when the gathered map data changes shape
 STAGE_MAX_AGE_S = 7 * 86400
 PLAQUE_FRAME_MM = 14.0
 PANEL_FRAME_MM = 8.0          # frame of each panel when the model is split into framed panels and no frame was asked        # narrowest frame that carries a plaque
@@ -114,6 +149,7 @@ class BuildResult:
     notes: list[str] = field(default_factory=list)
     attribution: list[str] = field(default_factory=list)
     single: Any = None                            # the whole model as one closed body (the STL)
+    colors: dict[str, str] = field(default_factory=lambda: palette_colors("classic"))   # part -> colour (the palette)
 
 
 class _Clock:
@@ -981,6 +1017,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # so none of their walls meets another solid's wall.
     water_bodies = 0
     level_grid = None
+    below_top = None
     cut = S.EMPTY
     water_solid = S.EMPTY
     if water_geom is not None:
@@ -1003,15 +1040,46 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             outline_prism = S.prism(water_geom, gfloor, over_top + 5.0)
             cut = S.subtract(outline_prism, [below_floor])
             water_solid = S.subtract(S.intersect(outline_prism, below_top), [below_floor])
+    sea_inside_poly = None
     if sea_poly is not None:
         # the sea: cut to a flat floor along the traced coastline (which reaches past the border, see _padded)
         cut = S.union([cut, S.prism(sea_poly, base - p.water_depth_mm, over_top + 5.0)])
         inside = sea_poly.intersection(model_box)
+        sea_inside_poly = inside if not inside.is_empty else None
         if not inside.is_empty:
             water_solid = S.union([water_solid, S.prism(inside, base - p.water_depth_mm, base)])
             water_geom = inside if water_geom is None else water_geom.union(inside)
     if not water_solid.is_empty():
         water_solid = S.intersect(water_solid, S.prism(model_box, -1.0, over_top + 10.0))
+    # shore lines: thin grooves in the water's surface that follow the shore of lakes and the sea a little way out, the
+    # way depth lines read on a chart (only in bodies wide enough to hold them)
+    shore_lines = 0
+    if p.water_lines > 0 and water_geom is not None and not water_solid.is_empty():
+        bands_in, bands_sea = [], []
+        for poly in S.polygons(water_geom.intersection(model_box)):
+            if poly.buffer(-WATER_LINE_WIDE_MM).is_empty:
+                continue
+            for i in range(p.water_lines):
+                ring = poly.buffer(-(WATER_LINE_FIRST_MM + WATER_LINE_STEP_MM * i)).boundary
+                if ring.is_empty:
+                    break
+                band = ring.buffer(WATER_LINE_MM / 2.0, quad_segs=2).intersection(poly.buffer(-0.3)).intersection(model_box.buffer(-0.3))
+                if band.is_empty:
+                    continue
+                shore_lines += 1
+                if sea_inside_poly is not None and band.representative_point().within(sea_inside_poly.buffer(0.01)):
+                    bands_sea.append(band)
+                else:
+                    bands_in.append(band)
+        grooves = []
+        if bands_in and below_top is not None:
+            g = shapely.union_all(np.array(bands_in, dtype=object))
+            grooves.append(S.subtract(S.prism(g, -1.0, over_top + 5.0), [below_top.translate((0.0, 0.0, -WATER_LINE_DEPTH_MM))]))
+        if bands_sea:
+            g = shapely.union_all(np.array(bands_sea, dtype=object))
+            grooves.append(S.prism(g, base - WATER_LINE_DEPTH_MM, base + 1.0))
+        if grooves:
+            water_solid = S.subtract(water_solid, grooves)
     terrain_wet = S.subtract(terrain, [cut]) if not cut.is_empty() else terrain
 
     # 6. bridges: over water a deck carried on piers and round arches (or a solid causeway when arches are off); off the
@@ -1083,11 +1151,21 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             bridges.append(S.prism(shape, 0.0, deck))
     overpasses = sum(1 for sp in spans if not sp[5])
 
-    # weirs and dams: a low wall across the water (the level around it stays as it is), in the terrain's colour
+    # weirs and dams (a low wall across the water; the level around it stays as it is) and piers, jetties, breakwaters and
+    # groynes (a deck standing in the water, on the sea too), in the terrain's colour
     weir_shapes = []
-    if water_geom is not None and level_grid is not None and feats.weirs:
+    pier_count = 0
+    sea_inside = sea_poly.intersection(model_box) if sea_poly is not None else None
+
+    def water_top(pts: np.ndarray) -> np.ndarray:
+        lv = _sample(level_grid, xs, ys, pts[:, 0], pts[:, 1]) if level_grid is not None else np.full(len(pts), base)
+        if sea_inside is not None and not sea_inside.is_empty:
+            lv = np.where(shapely.contains_xy(sea_inside.buffer(0.3), pts[:, 0], pts[:, 1]), base, lv)
+        return lv
+
+    if water_geom is not None and (feats.weirs or feats.piers):
         reach = water_geom.buffer(0.3)
-        for geom, kind in feats.weirs:
+        for geom, kind in list(feats.weirs) + list(feats.piers):
             narrow, real_w, above = WEIR[kind]
             g = to_mm(geom)
             if g is None or g.is_empty:
@@ -1100,10 +1178,13 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             pts = detail.along([q.exterior for q in S.polygons(inner)], 0.2)
             if not len(pts):
                 continue
-            lv = _sample(level_grid, xs, ys, pts[:, 0], pts[:, 1])
+            lv = water_top(pts)
             floor = max(float(lv.min()) - p.water_depth_mm - 0.1, 0.4)
             bridges.append(S.prism(band, floor, float(lv.max()) + above))
-            weir_shapes.append(band)
+            if kind in ("weir", "dam"):
+                weir_shapes.append(band)
+            else:
+                pier_count += 1
     bridge_solid = S.union(bridges)
     if not bridge_solid.is_empty():
         water_solid = S.subtract(water_solid, [bridge_solid])
@@ -1111,6 +1192,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # 7. buildings ----------------------------------------------------------------------------------------------------------
     building_solids = []
     building_shapes = []
+    building_tall = []                    # parallel to building_solids: drawn as a tower in its own colour
     dropped = 0
     sink = max(0.3, p.road_depth_mm + 0.1, p.contour_depth_mm + 0.1)   # below any groove next to the walls
     roofs = 0
@@ -1165,6 +1247,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             roofs += 1 if roof not in ("", "flat") else 0
             building_solids.append(solid)
             building_shapes.append(shape)
+            building_tall.append(p.tall_buildings_m > 0 and bld.height_m >= p.tall_buildings_m)
         clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof), {dropped} too small")
     # the owner's place: the building under the point (with its towers) in gold, or a marker standing there
     highlight = S.EMPTY
@@ -1183,12 +1266,15 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                          if building_shapes[i].intersection(fp).area >= 0.5 * building_shapes[i].area]
                 highlight = S.union([building_solids[i] for i in group])
                 building_solids = [b for i, b in enumerate(building_solids) if i not in set(group)]
+                building_tall = [t for i, t in enumerate(building_tall) if i not in set(group)]
                 highlight_kind = "building"
             else:
                 highlight = detail.marker(hp.x, hp.y, float(_sample(Z, xs, ys, np.array([hp.x]), np.array([hp.y]))[0]),
                                           size=max(1.2, min(4.0, min(W_mm, H_mm) * 0.012)))
                 highlight_kind = "marker"
     buildings = S.union(building_solids)
+    # towers (buildings at least tall_buildings_m high) in a colour of their own: a share of the buildings' volume
+    towers = S.union([s for s, t in zip(building_solids, building_tall) if t]) if any(building_tall) else S.EMPTY
 
     # 7b. what covers a mountain, read from the aerial photo (Spain): bare rock, meadow and woods where they really are,
     # instead of guessing the rock from the slope alone (a steep meadow is green, a gentle limestone plateau is rock)
@@ -1348,7 +1434,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             snow = []
             line_m = detail.snow_line(land, p.snow_m)
             if line_m is not None:
-                snow.append(_below(-elev, xs, ys, -line_m))
+                lying = detail.snow_mask(elev, cell_m, line_m, p.lat)
+                snow.append(_below(-_gaussian(lying.astype(float), 0.8), xs, ys, -0.5))
             if feats.ice is not None:
                 snow.append(to_mm(feats.ice))
             snow = [g for g in snow if g is not None and not g.is_empty]
@@ -1411,7 +1498,9 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             zone_shapes[name] = g
             layers_drawn.append(name)
         parts["terrain"] = terrain_body
-        parts["buildings"] = buildings
+        parts["buildings"] = S.subtract(buildings, [towers]) if not towers.is_empty() else buildings
+        if not towers.is_empty():
+            parts["towers"] = towers
         parts["water"] = water_solid
         if not trees_solid.is_empty():
             parts["trees"] = S.subtract(trees_solid, [ground_all, buildings, highlight])
@@ -1590,6 +1679,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "weight_g_pla": round(grams, 0),
         "parts": {n: {"volume_cm3": round(m.volume() / 1000.0, 2), "triangles": m.num_tri(), "genus": m.genus()} for n, m in parts.items()},
         "buildings": len(building_solids),
+        "towers": int(sum(building_tall)),
         "buildings_dropped": dropped,
         "building_source": building_source,
         "roads_drawn": len(road_lines),
@@ -1600,6 +1690,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "bridges": len(spans),
         "overpasses": overpasses,
         "weirs": len(weir_shapes),
+        "piers": pier_count,
+        "shore_lines": shore_lines,
         "arched_bridges": arched,
         "rails_drawn": len(rail_lines),
         "paths_drawn": len(path_lines),
@@ -1633,7 +1725,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                   "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None,
                   "weirs": shapely.union_all(np.array(weir_shapes, dtype=object)) if weir_shapes else None,
                   "plazas": zone_shapes.get("plazas"), "fields": zone_shapes.get("fields"), "track": track_shape}
-    result = BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)
+    result = BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole,
+                         colors=palette_colors(p.palette))
     try:
         stats["printability"] = printability.analyse(result, nozzle_mm=p.nozzle_mm)
     except Exception as exc:  # noqa: BLE001 - a report never breaks a model

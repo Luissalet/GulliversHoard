@@ -159,6 +159,10 @@ const D = {
   contours: ["Curvas de nivel", "Contour lines"],
   contours_help: ["Cada cuántos metros; 0 sin curvas, −1 automático.", "Every how many metres; 0 none, −1 automatic."],
   water_depth: ["Profundidad del agua", "Water depth"],
+  water_lines: ["Líneas de orilla", "Shore lines"],
+  water_lines_help: ["Surcos finos en el agua que siguen la orilla de lagos y mar, como las líneas de profundidad de una carta (0 = ninguna).", "Thin grooves in the water following the shore of lakes and the sea, like depth lines on a chart (0 = none)."],
+  tall_buildings: ["Torres en su color desde", "Towers in their colour from"],
+  tall_buildings_help: ["Los edificios de al menos esa altura salen como parte «Torres» con color propio (0 = no).", "Buildings at least this tall are a part of their own, «Towers», with its own colour (0 = off)."],
   frame: ["Marco", "Frame"],
   frame_help: ["Borde alrededor; 0 sin marco.", "Border around it; 0 for none."],
   label_bottom: ["Rótulo grabado debajo", "Text engraved underneath"],
@@ -272,7 +276,7 @@ const D = {
   delete_msg: ["Se borran sus parámetros y todos sus archivos generados.", "Its parameters and every generated file are deleted."],
   details: ["Fuentes y detalles", "Sources and details"],
   dem_used: ["Relieve: {src}, {res} m por muestra.", "Elevation: {src}, {res} m per sample."],
-  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes ({overpasses} sobre calles, vías o barrancos), {weirs} azudes y presas.", "{roads} streets and rails, {water} water bodies, {bridges} bridges ({overpasses} over streets, railways or ravines), {weirs} weirs and dams."],
+  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes ({overpasses} sobre calles, vías o barrancos), {weirs} azudes y presas, {piers} muelles y espigones.", "{roads} streets and rails, {water} water bodies, {bridges} bridges ({overpasses} over streets, railways or ravines), {weirs} weirs and dams, {piers} piers and breakwaters."],
   contours_every: ["Curvas de nivel cada {m} m.", "Contour lines every {m} m."],
 
   // settings
@@ -335,6 +339,13 @@ const D = {
 
   // finish: frame, plaque, panels, printability
   frame_style: ["Estilo del marco", "Frame style"],
+  palette: ["Paleta", "Palette"],
+  palette_classic: ["Clásica", "Classic"],
+  palette_sand: ["Arena", "Sand"],
+  palette_grey: ["Gris", "Grey"],
+  palette_white: ["Blanco", "White"],
+  palette_alpine: ["Alpina", "Alpine"],
+  palette_help: ["Colores con los que se ven las partes en el visor y en el laminador; los filamentos se eligen allí.", "The colours the parts show in the viewer and the slicer; the filaments are chosen there."],
   frame_style_flat: ["Plano", "Flat"],
   frame_style_bevel: ["Biselado", "Bevelled"],
   frame_style_step: ["Escalonado", "Stepped"],

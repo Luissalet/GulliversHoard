@@ -344,6 +344,7 @@ class Cutting(FakeSources):
             way(4, [(40, -200), (900, -200)], {"highway": "secondary"}),
             way(5, canal, {"natural": "water", "water": "canal"}),
             way(6, [(500, 270), (500, 330)], {"waterway": "weir"}),
+            way(7, [(-300, 270), (-300, 300)], {"man_made": "pier"}),
         ]}
 
 
@@ -415,3 +416,60 @@ def test_mountain_ground_read_from_the_photo():
     off = build(p.model_copy(update={"ground_from_photo": False}), PhotoAlps(), name="Foto")
     assert not off.stats["ground_from_photo"] and off.footprints["rock"].intersection(west).area > 0.1 * west.area
     assert closed(r.parts["rock"]) and closed(r.single)
+
+
+def test_palettes_colour_every_output():
+    import io
+    import zipfile
+    import trimesh
+    from gulliver_hoard.mesh import export as E
+    from gulliver_hoard.mesh.build import PALETTES
+    r = build(make(color="color", palette="sand"), FakeSources(), name="L")
+    assert r.colors["terrain"] == PALETTES["sand"]["terrain"] and r.colors["roads"] == PALETTES["sand"]["roads"]
+    model = zipfile.ZipFile(io.BytesIO(E.threemf_bytes(r.parts, colors=r.colors))).read("3D/3dmodel.model").decode()
+    assert f'displaycolor="{PALETTES["sand"]["terrain"]}FF"' in model
+    scene = trimesh.load(io.BytesIO(E.glb_bytes([("model", r.parts)], colors=r.colors)), file_type="glb")
+    terrain = [g for n, g in scene.geometry.items() if n.endswith("__terrain")][0]
+    rgb = [int(round(c)) for c in terrain.visual.material.baseColorFactor[:3]]
+    assert rgb == [int(PALETTES["sand"]["terrain"][i:i + 2], 16) for i in (1, 3, 5)]
+    assert set(PALETTES) == {"classic", "sand", "grey", "white", "alpine"}
+    assert all(set(c) == set(PALETTES["classic"]) for c in PALETTES.values())    # every palette colours every part
+
+
+def test_tall_buildings_are_a_part_of_their_own():
+    r = build(make(color="color", tall_buildings_m=60), FakeSources(), name="L")
+    assert r.stats["towers"] >= 1 and "towers" in r.parts
+    assert closed(r.parts["towers"]) and closed(r.parts["buildings"]) and closed(r.single)
+    assert S.intersect(r.parts["towers"], r.parts["buildings"]).volume() < 0.01      # no volume in both
+    off = build(make(color="color"), FakeSources(), name="L")
+    assert "towers" not in off.parts and off.stats["towers"] == 0
+    total = r.parts["towers"].volume() + r.parts["buildings"].volume()
+    assert total == pytest.approx(off.parts["buildings"].volume(), rel=1e-3)
+
+
+def test_pier_stands_in_the_water_and_shore_lines_follow_the_shore():
+    p = make(color="color", width_m=1600, height_m=1600, size_mm=110, resolution_mm=0.4, buildings=False, trees=False, z_exag=1.0)
+    r = build(p, Cutting(), name="Corte")
+    assert r.stats["piers"] == 1 and r.stats["weirs"] == 1
+    lake = build(make(color="color", water_lines=2), FakeSources(), name="L")
+    plain = build(make(color="color"), FakeSources(), name="L")
+    assert lake.stats["shore_lines"] >= 1 and plain.stats["shore_lines"] == 0
+    assert closed(lake.parts["water"])
+    lost = plain.parts["water"].volume() - lake.parts["water"].volume()
+    assert 0.05 < lost < 5.0                                              # thin grooves, not a cut
+
+
+def test_snow_lies_in_patches_not_on_cliffs():
+    from gulliver_hoard.mesh import detail
+    n = 120
+    y, x = np.mgrid[0:n, 0:n].astype(float)
+    elev = 2000.0 + 4.0 * y                                     # rises northwards: every slope faces south...
+    elev[:, 60:] = 2000.0 + 4.0 * (n - y[:, 60:])              # ...but the east half falls northwards (shaded)
+    elev[90:, 20:30] += 30.0 * (x[90:, 20:30] - 20.0)          # a cliff above the line
+    m = detail.snow_mask(elev, 10.0, 2300.0, 43.0)
+    gentle = (elev >= 2300) & ~((y >= 90) & (x >= 20) & (x < 30))
+    assert m[gentle].mean() > 0.9                              # snow above the line...
+    assert not m[91:, 21:29].any()                             # ...but not on the cliff
+    band = (elev > 2180) & (elev < 2290)
+    assert m[:, 61:][band[:, 61:]].mean() > 0.8               # below the line only on the shaded side
+    assert m[:, :59][band[:, :59]].mean() < 0.05

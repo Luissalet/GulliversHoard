@@ -58,10 +58,11 @@ def write_outputs(result: BuildResult, folder: Path, *, name: str, bed: tuple[fl
     meta = {"Designer": "Gulliver's Hoard", "Description": f"{name} · {format_coord(p.lon, p.lat)} · {result.stats['scale']}",
             "Copyright": "; ".join(result.attribution)}
     files["3mf"] = f"{slug}.3mf"
-    write_bytes_atomic(tmp / files["3mf"], E.threemf_bytes(result.parts, title=name, lang=lang, thumbnail=small, metadata=meta), fsync=False)
+    write_bytes_atomic(tmp / files["3mf"], E.threemf_bytes(result.parts, title=name, lang=lang, thumbnail=small, metadata=meta,
+                                                                   colors=result.colors), fsync=False)
     parts_info = {}
     for n, m in result.parts.items():
-        parts_info[n] = {"label": PART_LABELS.get(n, (n, n))[lang], "color": PART_COLORS.get(n, "#cccccc"),
+        parts_info[n] = {"label": PART_LABELS.get(n, (n, n))[lang], "color": result.colors.get(n, PART_COLORS.get(n, "#cccccc")),
                          "volume_cm3": round(m.volume() / 1000.0, 2), "triangles": m.num_tri(), **_check(m)}
     tiles_info = []
     if result.tiles:
@@ -77,7 +78,8 @@ def write_outputs(result: BuildResult, folder: Path, *, name: str, bed: tuple[fl
                 stl_name = f"tiles/{slug}-{t['id']}.stl"
                 mf_name = f"tiles/{slug}-{t['id']}.3mf"
                 stl = E.stl_bytes(tw, f"{name} {t['id']}")
-                mf = E.threemf_bytes(t["parts"], title=f"{name} {t['id']}", lang=lang, metadata=meta)
+                mf = E.threemf_bytes(t["parts"], title=f"{name} {t['id']}", lang=lang, metadata=meta,
+                                    colors=result.colors)
                 write_bytes_atomic(tmp / stl_name, stl, fsync=False)
                 write_bytes_atomic(tmp / mf_name, mf, fsync=False)
                 z.writestr(Path(stl_name).name, stl)
@@ -92,7 +94,7 @@ def write_outputs(result: BuildResult, folder: Path, *, name: str, bed: tuple[fl
         groups = [(t["id"], t["parts"]) for t in result.tiles]
     else:
         groups = [("model", result.parts)]
-    write_bytes_atomic(tmp / "preview.glb", E.glb_bytes(groups), fsync=False)
+    write_bytes_atomic(tmp / "preview.glb", E.glb_bytes(groups, colors=result.colors), fsync=False)
     files["glb"] = "preview.glb"
     files["thumb"] = "thumb.png"
     bb = whole.bounding_box()

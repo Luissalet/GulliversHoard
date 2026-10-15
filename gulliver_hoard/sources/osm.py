@@ -100,6 +100,7 @@ class Features:
     water: Any = None             # Polygon/MultiPolygon (areas)
     waterways: list[tuple[Any, float, str]] = field(default_factory=list)   # (line, width_m, kind)
     weirs: list[tuple[Any, str]] = field(default_factory=list)   # (line or outline, "weir" | "dam") across the water
+    piers: list[tuple[Any, str]] = field(default_factory=list)   # (line or outline, "pier" | "breakwater" | "groyne")
     roads: list[Road] = field(default_factory=list)
     rails: list[Road] = field(default_factory=list)
     green: Any = None             # Polygon/MultiPolygon (all vegetation)
@@ -125,6 +126,7 @@ class Features:
             "water_km2": round((self.water.area if self.water is not None else 0.0) / 1e6, 4),
             "waterways": len(self.waterways),
             "weirs": len(self.weirs),
+            "piers": len(self.piers),
             "roads": len(self.roads),
             "bridges": sum(1 for r in self.roads if r.bridge),
             "rails": len(self.rails),
@@ -150,12 +152,13 @@ def build_query(bbox: tuple[float, float, float, float], timeout: int = 180) -> 
             'way["building:part"];relation["building:part"];'
             'way["natural"="water"];relation["natural"="water"];'
             'way["water"];relation["water"];'
-            'way["leisure"="swimming_pool"];way["amenity"="fountain"];'
+            'way["leisure"="swimming_pool"];way["amenity"="fountain"];way["leisure"="track"];'
             'node["natural"="tree"];way["natural"="tree_row"];'
             'way["natural"~"^(bare_rock|scree|shingle|glacier)$"];relation["natural"~"^(bare_rock|scree|shingle|glacier)$"];'
             'way["waterway"~"^(riverbank|dock)$"];relation["waterway"="riverbank"];'
             'way["landuse"~"^(reservoir|basin)$"];relation["landuse"~"^(reservoir|basin)$"];'
             'way["waterway"~"^(river|stream|canal|drain|ditch|weir|dam)$"];'
+            'way["man_made"~"^(pier|breakwater|groyne)$"];'
             'way["landuse"~"^(farmland|plant_nursery)$"];relation["landuse"="farmland"];way["barrier"="hedge"];'
             'way["highway"];way["area:highway"];way["place"="square"];'
             'relation["highway"="pedestrian"];relation["place"="square"];relation["area:highway"];'
@@ -484,6 +487,10 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
         if kind == "way" and tags.get("waterway") in ("weir", "dam"):
             feats.weirs.append((shape if shape is not None else line, tags["waterway"]))
             continue
+        if kind == "way" and tags.get("man_made") in ("pier", "breakwater", "groyne"):
+            area_ok = shape is not None and tags.get("area") != "no"
+            feats.piers.append((shape if area_ok else line, tags["man_made"]))
+            continue
         if kind == "way" and tags.get("waterway") in WATERWAY_WIDTH_M:
             w = _num(tags.get("width")) or WATERWAY_WIDTH_M[tags["waterway"]]
             if tags.get("tunnel") in ("yes", "culvert"):
@@ -558,6 +565,7 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     feats.rails = [r for r in feats.rails if r.line is not None and r.line.intersects(clip)]
     feats.waterways = [w for w in feats.waterways if w[0] is not None and w[0].intersects(clip)]
     feats.weirs = [w for w in feats.weirs if w[0] is not None and w[0].intersects(clip)]
+    feats.piers = [w for w in feats.piers if w[0] is not None and w[0].intersects(clip)]
     landmarks.sort(key=lambda l: (l["rank"], -l["height_m"], -l["area_m2"]))
     seen_names: set[str] = set()
     landmarks = [l for l in landmarks if not (l["name"] in seen_names or seen_names.add(l["name"]))]
@@ -566,9 +574,16 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     return feats
 
 
+HARD_SURFACES = {"clay", "dirt", "sand", "tartan", "asphalt", "concrete", "gravel", "fine_gravel", "paving_stones", "compacted",
+                 "ground", "paved", "acrylic"}
+
+
 def _is_plaza(tags: dict[str, str]) -> bool:
-    """A square or a pedestrian area (drawn as an area, not as a street line)."""
+    """A square or a pedestrian area (drawn as an area, not as a street line), or a sports ground without grass: a running
+    track, a clay court, a dirt infield."""
     if tags.get("place") == "square":
+        return True
+    if tags.get("leisure") == "track" or (tags.get("leisure") == "pitch" and tags.get("surface") in HARD_SURFACES):
         return True
     if tags.get("area:highway") in ("pedestrian", "footway", "living_street"):
         return True

@@ -305,6 +305,7 @@ export default function Nueva({ query }) {
             </label>
             <NumberField id="f-contours" label={t("contours")} unit="m" step={5} min={-1} value={form.contours_m} onChange={(v) => set({ contours_m: v })} hint={t("contours_help")} />
             <NumberField id="f-wd" label={t("water_depth")} unit="mm" step={0.1} min={0.1} value={form.water_depth_mm} onChange={(v) => set({ water_depth_mm: v })} />
+            <NumberField id="f-wl" label={t("water_lines")} unit="" step={1} min={0} max={6} value={form.water_lines} onChange={(v) => set({ water_lines: v })} hint={t("water_lines_help")} />
             <NumberField id="f-rd" label={t("road_depth")} unit="mm" step={0.05} min={0.05} value={form.road_depth_mm} onChange={(v) => set({ road_depth_mm: v })} hint={t("road_depth_help")} />
           </div>
         </Group>
@@ -350,6 +351,7 @@ export default function Nueva({ query }) {
             <NumberField id="f-snow" label={t("snow_m")} unit="m" step={100} min={-1} value={form.snow_m} onChange={(v) => set({ snow_m: v })} hint={t("snow_help")} />
             <NumberField id="f-mrr" label={t("max_relief")} unit="×" step={0.05} min={0.05} max={2} value={form.max_relief_ratio} onChange={(v) => set({ max_relief_ratio: v })} hint={t("max_relief_help")} />
             <NumberField id="f-rock" label={t("rock_slope")} unit="°" step={1} min={10} max={80} value={form.rock_slope_deg} onChange={(v) => set({ rock_slope_deg: v })} />
+            <NumberField id="f-tall" label={t("tall_buildings")} unit="m" step={10} min={0} max={600} value={form.tall_buildings_m} onChange={(v) => set({ tall_buildings_m: v })} hint={t("tall_buildings_help")} />
           </div>
         </Group>
 
@@ -445,6 +447,26 @@ export default function Nueva({ query }) {
             {["color", "mono"].map((k) => <button key={k} type="button" className="flex-1" aria-pressed={form.color === k} onClick={() => set({ color: k })}>{t(`color_${k}`)}</button>)}
           </div>
           <div className="help">{t(`color_${form.color}_help`)}</div>
+          {form.color === "color" && (
+            <>
+              <span className="label">{t("palette")}</span>
+              <div className="palette-list" role="radiogroup" aria-label={t("palette")}>
+                {["classic", "sand", "grey", "white", "alpine"].map((k) => {
+                  const c = defaults?.palettes?.[k] || {};
+                  return (
+                    <button key={k} type="button" role="radio" aria-checked={(form.palette || "classic") === k} className="palette-opt"
+                            onClick={() => set({ palette: k })}>
+                      <span className="palette-swatches" aria-hidden="true">
+                        {["terrain", "roads", "buildings", "green", "trees", "water", "rock"].map((part) => <span key={part} style={{ background: c[part] }} />)}
+                      </span>
+                      <span>{t(`palette_${k}`)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="help">{t("palette_help")}</div>
+            </>
+          )}
         </Group>
 
         <div className="new-actions">

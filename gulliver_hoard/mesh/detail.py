@@ -351,6 +351,21 @@ def snow_line(elev: np.ndarray, snow_m: float) -> Optional[float]:
     return max(1800.0, hi - 0.2 * (hi - lo))
 
 
+def snow_mask(elev: np.ndarray, cell_m: float, line_m: float, lat: float, steep_deg: float = 40.0) -> np.ndarray:
+    """Where snow lies on the model: above the snow line wherever the slope holds it (cliffs steeper than ``steep_deg``
+    stay bare rock), and in a band below the line only on the shaded side (facing the pole) and not too steep. That
+    gives the patchy snowfields and bare ridges of a real range instead of one white cap."""
+    gy, gx = np.gradient(elev, cell_m)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    hi = float(np.nanmax(elev))
+    band = max(60.0, 0.35 * (hi - line_m))
+    poleward = -gy if lat >= 0 else gy            # rows run south to north: the ground falls towards the pole
+    shaded = poleward > 0.15 * np.hypot(gx, gy) + 0.02
+    above = (elev >= line_m) & (slope < steep_deg)
+    below = (elev >= line_m - band) & (elev < line_m) & shaded & (slope < steep_deg - 5.0)
+    return above | below
+
+
 def slope_deg(elev: np.ndarray, cell_m: float) -> np.ndarray:
     gy, gx = np.gradient(elev, cell_m)
     return np.degrees(np.arctan(np.hypot(gx, gy)))
