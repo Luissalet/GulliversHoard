@@ -129,7 +129,7 @@ LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
 TERRAIN_TOL_MM = 0.02         # how far the simplified terrain may stray from the elevation grid
-STAGE_VERSION = 12             # bump when the gathered map data changes shape
+STAGE_VERSION = 13             # gathered heights must follow the new bare-earth terrain
 STAGE_MAX_AGE_S = 7 * 86400
 PLAQUE_MM = 0.6               # the plaque's letters stand this high (and sink as deep into the frame)
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
@@ -1812,7 +1812,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "ground_m": [round(area.width_m), round(area.height_m)],
         "area_km2": round(area.km2, 3),
         "relief_m": [round(float(np.nanmin(land)), 1), round(float(np.nanmax(land)), 1)],
-        "dem": {"source": dem.source, "res_m": round(dem.res_m, 1), "smoothing_cells": round(sigma, 2)},
+        "dem": {"source": dem.source, "res_m": round(dem.res_m, 1), "smoothing_cells": round(sigma, 2),
+                **getattr(dem, "quality", {})},
         "grid": [nx, ny],
         "triangles": int(sum(m.num_tri() for m in parts.values())),
         "volume_cm3": round(volume / 1000.0, 1),

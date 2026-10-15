@@ -88,6 +88,10 @@ class Composite:
         return self.primary.res_m
 
     @property
+    def quality(self) -> dict:
+        return getattr(self.primary, "quality", {})
+
+    @property
     def attribution(self) -> str:
         parts = [self.primary.attribution] + ([self.fallback.attribution] if self.fallback else [])
         return "; ".join(p for p in parts if p)
@@ -236,9 +240,28 @@ def fetch_dem(fetcher: Fetcher, bbox: tuple[float, float, float, float], want_re
               progress: Optional[Progress] = None) -> Any:
     """The best elevation for ``bbox`` at about ``want_res_m`` metres per sample. ``prefer``: auto | ign | terrarium."""
     errors: list[str] = []
+    if prefer == "auto":
+        from . import dtm
+        for provider in dtm.candidates(bbox, want_res_m):
+            try:
+                grid = dtm.fetch(fetcher, bbox, want_res_m, provider, progress)
+                fallback = None
+                if np.isnan(grid.data).any():
+                    rows, cols = grid.data.shape
+                    x, y = grid.origin
+                    dx, dy = grid.step
+                    coverage = (x - dx / 2, y - (rows - .5) * dy, x + (cols - .5) * dx, y + dy / 2)
+                    fallback = fetch_dem(fetcher, coverage, want_res_m, prefer="ign" if ign_covers(bbox) else "terrarium",
+                                         progress=progress)
+                    dtm.fill_land_gaps(grid, fallback)
+                grid.notes.extend(errors)
+                return Composite(grid, fallback)
+            except GulliverError as exc:
+                errors.append(f"{provider.name}: {exc.message}")
     if prefer in ("auto", "ign") and ign_covers(bbox):
         try:
             grid = fetch_ign(fetcher, bbox, want_res_m, progress)
+            grid.notes.extend(errors)
             fallback = None
             if np.isnan(grid.data).any():
                 fallback = fetch_terrarium(fetcher, bbox, max(want_res_m, 20.0), progress)

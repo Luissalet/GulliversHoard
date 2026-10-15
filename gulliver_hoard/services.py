@@ -116,11 +116,15 @@ class Services:
         tw, th = params.tile_size_mm()
         fits = (tw <= s["bed_x_mm"] and th <= s["bed_y_mm"]) or (th <= s["bed_x_mm"] and tw <= s["bed_y_mm"])
         bbox = params.area.bbox
-        if params.dem in ("auto", "ign") and dem_mod.ign_covers(bbox) and not getattr(self.sources, "fake", False):
+        from .sources import dtm
+        fine = dtm.candidates(bbox, params.cell_ground_m) if params.dem == "auto" else []
+        if getattr(self.sources, "fake", False):
+            dem_text = "demo"
+        elif fine:
+            dem_text = f"{fine[0].name} (auto)"
+        elif params.dem in ("auto", "ign") and dem_mod.ign_covers(bbox):
             res, cov = dem_mod.ign_coverage(bbox, params.cell_ground_m)
             dem_text = f"IGN MDT {res:g} m"
-        elif getattr(self.sources, "fake", False):
-            dem_text = "demo"
         else:
             z = dem_mod.terrarium_zoom(bbox, params.cell_ground_m)
             dem_text = f"Terrarium z{z} (~{dem_mod.terrarium_res(params.lat, z):.0f} m)"
@@ -163,6 +167,8 @@ class Services:
             "frame_mm": round(fr, 1),
             "bed_mm": [s["bed_x_mm"], s["bed_y_mm"]],
             "dem": dem_text,
+            "terrain_candidates": [{"source": p.key, "name": p.name, "native_m": p.native_m, "licence": p.licence}
+                                   for p in fine] if not getattr(self.sources, "fake", False) else [],
             "roads": RANK_NAMES[params.effective_road_rank()],
             "road_rank": params.effective_road_rank(),
             "warnings": warnings,

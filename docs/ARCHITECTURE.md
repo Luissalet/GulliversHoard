@@ -1,5 +1,7 @@
 # Architecture
 
+`sources/dtm.py` selects only verified bare-earth WCS/WMS layers for regional Spain, AHN and France LiDAR HD. It reuses the existing surface reader's request/GeoTIFF decoding, with a separate versioned `dtm_grid` cache and **bilinear** terrain reprojection (never the DSM highest-value rule). It reads 60 m around the requested crop to recognise enclosed survey holes; missing cells within 30 m of measured ground are filled in enclosed components and within 60 m in open land gaps whose coarse reference is above 0.3 m. Cached masks keep interpolation from borrowing previously interpolated values; the report gives measured, interpolated and fallback fractions of the read raster. Reference sea cells stay missing and use the ordinary DEM fallback; the fallback covers the entire padded raster, avoiding edge extrapolation when classifying land. The report counts both interpolation passes explicitly. `dem.fetch_dem(auto)` tries the applicable terrain providers before IGN/Terrarium; explicit preferences preserve their old behaviour. The source grid is coarsened when necessary to the existing mesh budget, and the report records effective sampling and any interpolation. `area_check` exposes the same candidate source metadata through UI, REST and MCP without downloading a raster. A stage-version bump invalidates gathered heights derived from the old ground; historical builds remain available for A/B comparison.
+
 ```
 browser / MCP bridge / Faustus / Hoard Hub
         │  HTTP (127.0.0.1:5206)

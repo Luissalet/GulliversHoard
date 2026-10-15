@@ -4,6 +4,8 @@ Makes printable 3D models of real places, anywhere on Earth. Pick an area on the
 
 Lea esto en español: [README.es.md](README.es.md).
 
+Terrain in `auto` now tries bare-earth LiDAR in Navarra (2 m), Gipuzkoa (2017, 1 m), the Netherlands (AHN DTM, 0.5 m) and France (LiDAR HD MNT, 0.5 m) for areas up to 25 km², sampled at the model's ground-cell size. These are native source resolutions, not a promise of submillimetre print detail or complete coverage. The source check lists candidates; the build report records the source that answered, actual sampling and gaps. Survey gaps borrow measured bare ground: up to 30 m in enclosed gaps, and up to 60 m in open gaps whose coarse reference lies above sea level. Cells at or below the sea threshold and other missing cells retain the IGN/Terrarium fallback. The report distinguishes interpolation from measured ground. The national Spanish WCS still offers 5 m as its finest terrain grid. Explicit IGN or Terrarium selections are preserved.
+
 ![Model](docs/screens/model.png)
 
 ## What it does
