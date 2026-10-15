@@ -9,6 +9,7 @@ from . import aerial as _aerial
 from . import canopy as _canopy
 from . import landcover as _landcover
 from . import msbuildings as _msb
+from . import openbuildings as _ob
 from . import catastro as _catastro
 from . import dsm as _dsm
 from . import dem as _dem
@@ -69,6 +70,10 @@ class Sources:
     def footprints(self, bbox, *, progress: Optional[Callable[[str], None]] = None) -> list[dict[str, Any]]:
         """Building footprints traced from imagery (worldwide) over the area."""
         return _msb.fetch(self.fetcher, bbox, progress=progress)
+
+    def open_buildings(self, bbox, *, progress: Optional[Callable[[str], None]] = None) -> list[dict[str, Any]]:
+        """Footprints and heights seen from space (Africa, South and South-East Asia, Latin America) over the area."""
+        return _ob.fetch(self.fetcher, bbox, progress=progress)
 
     def dsm(self, bbox, *, res_m: float = 1.0, progress: Optional[Callable[[str], None]] = None):
         """Surface heights from an open laser survey (heights, lon/lat bounds, attribution, is_ndsm)."""

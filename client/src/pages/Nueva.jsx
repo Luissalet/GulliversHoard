@@ -408,7 +408,7 @@ export default function Nueva({ query }) {
             <input type="file" className="field" accept=".gpx,.kml,.geojson,.json" onChange={loadTrack} aria-label={t("route")} />
             {form.track ? (
               <>
-                <div className="help">{t("track_loaded", { name: trackName || t("track_file"), pts: trackInfo ? num(trackInfo.points, 0, lang) : "?", n: trackInfo ? trackInfo.lines : "?" })}</div>
+                <div className="help">{t(trackInfo && trackInfo.lines === 1 ? "track_loaded_one" : "track_loaded", { name: trackName || t("track_file"), pts: trackInfo ? num(trackInfo.points, 0, lang) : "?", n: trackInfo ? trackInfo.lines : "?" })}</div>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" className="btn btn-sm" onClick={frameTrack} disabled={!trackInfo}><Icon d={ICONS.target} size={13} /> {t("track_frame")}</button>
                   <button type="button" className="btn btn-sm" onClick={clearTrack}><Icon d={ICONS.close} size={13} /> {t("track_remove")}</button>

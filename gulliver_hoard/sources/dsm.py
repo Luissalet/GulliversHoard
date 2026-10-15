@@ -472,7 +472,8 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
                      ) -> list[Optional[dict]]:
     """For each footprint (shapely polygons in metres of ``projector``) a dict, or None where the model has no data:
 
-    ``roof_m``: 90th percentile of the height above ground inside the footprint;
+    ``roof_m``: 90th percentile of the height above ground inside the footprint (about the ridge);
+    ``eaves_m``: its 25th percentile (about the eaves: a pitched roof shows as a gap between the two);
     ``top_m``: its highest point that is at least 2 m wide (so a lone noisy cell or a crane's wire does not count; a spire's
     tip does), or the 99.5th percentile if that is higher;
     ``towers``: ``[(polygon in metres, top_m), ...]`` for the connected parts of the footprint more than ``tower_over_m``
@@ -548,6 +549,7 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
                 continue
         rel = np.maximum(vals - ground, 0.0)
         roof = float(np.percentile(rel, 90))
+        eaves = float(np.percentile(rel, 25))
         top = float(np.percentile(rel, 99.5))
         rel_sub = sub - ground
         k = int(round(2.0 / cell))
@@ -582,5 +584,5 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
             towers.sort(key=lambda t: -t[1])
             if towers:
                 top = max(top, towers[0][1])
-        out[i] = {"roof_m": round(roof, 2), "top_m": round(top, 2), "towers": towers}
+        out[i] = {"roof_m": round(roof, 2), "eaves_m": round(eaves, 2), "top_m": round(top, 2), "towers": towers}
     return out

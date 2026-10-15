@@ -14,6 +14,8 @@ shrunk into slivers. Every piece of the artwork keeps a margin of 0.8 mm from th
 
 from __future__ import annotations
 
+import functools
+
 import math
 from typing import Any, Optional
 
@@ -33,9 +35,30 @@ ELLIPSIS = "…"
 
 
 # -- helpers --------------------------------------------------------------------------------------------------------------------
+@functools.lru_cache(maxsize=1)
+def _stem_ratio() -> float:
+    """Stem width of the font the text is drawn with, as a fraction of its cap height (measured on an "I": Arial Bold
+    and DejaVu Sans Bold differ), a little under the real value."""
+    try:
+        from PIL import Image, ImageDraw
+
+        font = S._font(200)
+        img = Image.new("L", (400, 400), 0)
+        ImageDraw.Draw(img).text((100, 50), "I", font=font, fill=255)
+        a = np.asarray(img) > 127
+        rows, cols = np.nonzero(a)
+        if len(rows) == 0:
+            return STEM_RATIO
+        mid = a[(rows.min() + rows.max()) // 2]
+        ratio = float(mid.sum()) / float(rows.max() - rows.min() + 1)
+        return max(0.08, min(STEM_RATIO, ratio * 0.8))
+    except Exception:  # noqa: BLE001
+        return STEM_RATIO
+
+
 def _min_cap(min_stroke_mm: float) -> float:
     """The smallest cap height whose letter stems still reach ``min_stroke_mm``."""
-    return float(min_stroke_mm) / STEM_RATIO
+    return float(min_stroke_mm) / _stem_ratio()
 
 
 def _text_at(text: str, cap_mm: float, x: float = 0.0, y: float = 0.0) -> Any:

@@ -138,7 +138,8 @@ def outline(shape: str, width: float, height: float) -> Polygon:
 
 
 # -- text ---------------------------------------------------------------------------------------------------------------------
-FONT_CANDIDATES = ("arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "segoeuib.ttf",
+# heavy faces first: text is printed with a 0.4 mm nozzle, so thick stems matter more than looks (Arial Black on Windows)
+FONT_CANDIDATES = ("ariblk.ttf", "Arial Black.ttf", "C:/Windows/Fonts/ariblk.ttf", "arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "segoeuib.ttf",
                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "C:/Windows/Fonts/arialbd.ttf")
 
 
@@ -267,8 +268,13 @@ def pin_holes(footprint: Any, bounds: tuple[float, float, float, float], nx: int
     return union(holes), where
 
 
-_WELDED: "dict[int, tuple[Manifold, np.ndarray, np.ndarray]]" = {}
-_WELD_CACHE = 16
+_WELDED: "dict[tuple, tuple[np.ndarray, np.ndarray]]" = {}
+_WELD_BUDGET = 8_000_000          # triangles kept in the cache, all solids together (big city parts are millions each)
+
+
+def _fingerprint(solid: Manifold) -> tuple:
+    """Who a solid is without holding it (a cached reference would keep every big part of a build alive)."""
+    return (id(solid), solid.num_tri(), solid.num_vert(), tuple(round(v, 6) for v in solid.bounding_box()))
 
 
 def mesh_arrays(solid: Manifold, weld: bool = True) -> tuple[np.ndarray, np.ndarray]:
@@ -276,9 +282,10 @@ def mesh_arrays(solid: Manifold, weld: bool = True) -> tuple[np.ndarray, np.ndar
     keeps them apart in double precision, which a slicer would read as a pinched edge) and drops the triangles that collapse.
     The welded arrays of the last few solids are kept (the checks, the STL, the 3MF and the preview all read them)."""
     if weld:
-        hit = _WELDED.get(id(solid))
-        if hit is not None and hit[0] is solid:
-            return hit[1], hit[2]
+        fp = _fingerprint(solid)
+        hit = _WELDED.get(fp)
+        if hit is not None:
+            return hit
     mesh = solid.to_mesh()
     # copies: the arrays manifold hands out live in the mesh object, which is gone once this returns
     verts = np.array(np.asarray(mesh.vert_properties)[:, :3], dtype=np.float32, copy=True, order="C")
@@ -304,9 +311,9 @@ def mesh_arrays(solid: Manifold, weld: bool = True) -> tuple[np.ndarray, np.ndar
         remap = np.full(len(uniq), -1, dtype=np.int64)
         remap[used] = np.arange(len(used))
         out = (np.ascontiguousarray(uniq[used]), remap[t].astype(np.uint32))
-    if len(_WELDED) >= _WELD_CACHE:
+    _WELDED[fp] = out
+    while len(_WELDED) > 1 and sum(len(v[1]) for v in _WELDED.values()) > _WELD_BUDGET:
         _WELDED.pop(next(iter(_WELDED)))
-    _WELDED[id(solid)] = (solid, out[0], out[1])
     return out
 
 

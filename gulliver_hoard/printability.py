@@ -153,6 +153,12 @@ def _thin_trees(trees: Any, min_diameter_mm: float) -> tuple[int, int]:
 
 
 # -- the report ------------------------------------------------------------------------------------------------------------------
+NAMES = {"terrain": "Terreno", "buildings": "Edificios", "water": "Agua", "roads": "Carreteras", "rails": "Vías del tren",
+         "green": "Zonas verdes", "trees": "Árboles", "rock": "Roca", "snow": "Nieve", "frame": "Marco", "fields": "Campos",
+         "plazas": "Plazas", "track": "Ruta", "highlight": "Tu sitio", "plaque": "Placa"}
+INLAID = {"roads", "rails", "paths", "green", "fields", "plazas", "rock", "snow", "plaque"}
+
+
 def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[str, Any]:
     """Printability report of a build.
 
@@ -172,12 +178,15 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
     parts: dict[str, Any] = {}
     for name, solid in (getattr(result, "parts", None) or {}).items():
         parts[name] = _part_report(solid, tiny_mm3)
-    tiny_total = sum(p["tiny_bodies"] for p in parts.values())
-    bodies_total = sum(p["bodies"] for p in parts.values())
+    # colour layers (streets, rails, green, fields, squares, rock, snow) and the plaque's letters are inlaid in the solid
+    # under them: a crumb of one is printed in place, never loose on the bed
+    standing = {n: p for n, p in parts.items() if n not in INLAID}
+    tiny_total = sum(p["tiny_bodies"] for p in standing.values())
+    bodies_total = sum(p["bodies"] for p in standing.values())
     # one body per building or tree is normal; what hurts is a loose piece that is too small to print at all
     if tiny_total:
         penalty += min(25.0, 5.0 + 60.0 * tiny_total / max(1, bodies_total))
-    for name, info in parts.items():
+    for name, info in standing.items():
         n = info["tiny_bodies"]
         if not n:
             continue
@@ -186,9 +195,11 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         elif name == "trees":
             advice.append(f"Hay {_n(n, 'árbol minúsculo que no se agarraría', 'árboles minúsculos que no se agarrarían')} a la cama: sube tree_size_mm o baja tree_density.")
         elif name in ("terrain", "water"):
-            advice.append(f"La pieza «{name}» tiene {_n(n, 'islote diminuto', 'islotes diminutos')}: sube resolution_mm para suavizarla.")
+            advice.append(f"La pieza «{NAMES.get(name, name)}» tiene {_n(n, 'islote diminuto', 'islotes diminutos')}: sube resolution_mm para suavizarla.")
+        elif name == "track":
+            advice.append(f"La ruta tiene {_n(n, 'trozo suelto diminuto', 'trozos sueltos diminutos')}: sube track_width_mm.")
         else:
-            advice.append(f"La pieza «{name}» tiene {_n(n, 'trozo suelto diminuto', 'trozos sueltos diminutos')}: sube min_road_mm o resolution_mm.")
+            advice.append(f"La pieza «{NAMES.get(name, name)}» tiene {_n(n, 'trozo suelto diminuto', 'trozos sueltos diminutos')}: sube resolution_mm o el tamaño del modelo (size_mm).")
 
     n_build, n_thin_build = _thin_buildings(fp.get("buildings"), two)
     buildings = {"count": n_build, "thin_walls": n_thin_build, "min_side_mm": round(two, 3)}

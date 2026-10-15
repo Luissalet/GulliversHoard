@@ -324,6 +324,7 @@ const D = {
   route: ["Ruta", "Route"],
   track_help: ["Un archivo GPX, KML o GeoJSON (hasta 8 MB): la ruta sube como una cinta de otro color.", "A GPX, KML or GeoJSON file (up to 8 MB): the route is raised as a ribbon in its own colour."],
   track_loaded: ["{name}: {pts} puntos en {n} trazados", "{name}: {pts} points in {n} lines"],
+  track_loaded_one: ["{name}: {pts} puntos en un trazado", "{name}: {pts} points in one line"],
   track_file: ["Ruta cargada", "Loaded route"],
   track_too_big: ["El archivo de la ruta pasa de 8 MB.", "The route file is over 8 MB."],
   track_unreadable: ["No se pudo leer la ruta: usa un GPX, KML o GeoJSON con líneas.", "The route could not be read: use a GPX, KML or GeoJSON with lines."],

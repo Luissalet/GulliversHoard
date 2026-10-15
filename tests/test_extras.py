@@ -132,3 +132,13 @@ def test_null_clears_highlight_and_track_frames_the_model(services):
     assert p.highlight_lon is None and p.highlight_lat is None
     v = _around_track({"track": GPX})
     assert abs(v["lon"] + 3.702) < 0.01 and abs(v["lat"] - 40.42) < 0.01 and v["width_m"] >= 300
+
+
+def test_radar_pits_are_filled_but_valleys_kept():
+    from gulliver_hoard.mesh.build import _fill_pits
+    z = np.fromfunction(lambda i, j: 20 + 0.05 * i, (120, 100))
+    z[60:63, 40:43] -= 25                     # a void of the radar: a cone a few cells across
+    z[20:24, :] -= 3                          # a valley open to the border
+    big = z.copy(); big[70:110, 10:90] -= 6   # a wide closed basin (a real one): left alone
+    out, n = _fill_pits(big, 3.0, max_area_m2=20000.0)
+    assert n == 1 and out[61, 41] > 20 and out[22, 50] == big[22, 50] and out[90, 50] == big[90, 50]

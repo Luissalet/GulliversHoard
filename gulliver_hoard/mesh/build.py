@@ -31,6 +31,7 @@ from ..sources import canopy as canopy_mod
 from ..sources import catastro as catastro_mod
 from ..sources import landcover as landcover_mod
 from ..sources import msbuildings as msb_mod
+from ..sources import openbuildings as ob_mod
 from ..sources import dsm as dsm_mod
 from ..sources import osm as osm_mod
 from .. import printability
@@ -89,7 +90,7 @@ WATER_REACH_M = 150.0         # the water level at a point is never above the lo
 LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
-STAGE_VERSION = 1             # bump when the gathered map data changes shape
+STAGE_VERSION = 4             # bump when the gathered map data changes shape
 STAGE_MAX_AGE_S = 7 * 86400
 PLAQUE_FRAME_MM = 14.0
 PANEL_FRAME_MM = 8.0          # frame of each panel when the model is split into framed panels and no frame was asked        # narrowest frame that carries a plaque
@@ -316,6 +317,61 @@ def _stage_key(p: ModelParams) -> str:
     return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
+def _coarse(Z: np.ndarray, xs: np.ndarray, ys: np.ndarray, stride: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Every ``stride``-th sample of a grid, the last row and column always kept (the copy covers the same box)."""
+    ix = list(range(0, len(xs), stride))
+    iy = list(range(0, len(ys), stride))
+    if ix[-1] != len(xs) - 1:
+        ix.append(len(xs) - 1)
+    if iy[-1] != len(ys) - 1:
+        iy.append(len(ys) - 1)
+    return Z[np.ix_(iy, ix)], xs[ix], ys[iy]
+
+
+def _fill_pits(elev: np.ndarray, cell_m: float, *, min_depth_m: float = 4.0, max_area_m2: float = 60000.0) -> tuple[np.ndarray, int]:
+    """Closed hollows of the elevation that are deep but small (a radar void, a shore artefact: a cone tens of metres deep a
+    few cells across) are filled to their rim (priority flood from the border); real lakes and valleys are left alone,
+    being open to the border or big."""
+    import heapq
+
+    from scipy import ndimage
+
+    ny, nx = elev.shape
+    filled = elev.copy()
+    done = np.zeros(elev.shape, dtype=bool)
+    heap: list[tuple[float, int, int]] = []
+    for i in range(ny):
+        for j in (0, nx - 1):
+            heap.append((float(elev[i, j]), i, j)); done[i, j] = True
+    for j in range(1, nx - 1):
+        for i in (0, ny - 1):
+            heap.append((float(elev[i, j]), i, j)); done[i, j] = True
+    heapq.heapify(heap)
+    while heap:
+        z, i, j = heapq.heappop(heap)
+        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            a, b = i + di, j + dj
+            if 0 <= a < ny and 0 <= b < nx and not done[a, b]:
+                done[a, b] = True
+                if filled[a, b] < z:
+                    filled[a, b] = z
+                heapq.heappush(heap, (float(filled[a, b]), a, b))
+    depth = filled - elev
+    lab, n = ndimage.label(depth > 0.5)
+    if not n:
+        return elev, 0
+    idx = np.arange(1, n + 1)
+    deepest = ndimage.maximum(depth, lab, idx)
+    size = ndimage.sum(np.ones_like(depth), lab, idx) * cell_m * cell_m
+    bad = np.zeros(n + 1, dtype=bool)
+    bad[1:] = (deepest >= min_depth_m) & (size <= max_area_m2)
+    if not bad.any():
+        return elev, 0
+    mask = ndimage.binary_dilation(bad[lab], iterations=1)
+    out = np.where(mask, filled, elev)
+    return out, int(bad.sum())
+
+
 def _union_mm(geoms: list[Any]) -> Any:
     gs = [g for g in geoms if g is not None and not g.is_empty]
     return shapely.union_all(np.array(gs, dtype=object)) if gs else None
@@ -383,7 +439,7 @@ def _apply_landcover(feats: Any, classes: np.ndarray, bounds: tuple[float, float
             feats.green = union(feats.green, open_land)
             used.append("green")
     if p.zones:
-        if relief_m >= 150.0:
+        if relief_m >= 400.0:                       # bare ground is rock in the mountains; in a lowland it is a pitch or a yard
             rock = lc.area(classes, bounds, proj, lc.GROUPS["rock"], smooth_m=15.0, min_area_m2=2500.0)
             if rock is not None:
                 feats.rock = union(feats.rock, rock)
@@ -399,7 +455,12 @@ def _apply_landcover(feats: Any, classes: np.ndarray, bounds: tuple[float, float
             water = water.difference(feats.water.buffer(15.0))
         if water is not None:
             water = water.buffer(-6.0).buffer(6.0)
-            keep = [q for q in S.polygons(water) if q.area >= 3000.0]
+            # a lake nobody mapped stands apart; a patch along a mapped river or lake is its flooded margin (or a pixel
+            # of the river the map draws a little narrower) and would be cut as a pit beside it
+            near = [g for g in (feats.water.buffer(40.0) if feats.water is not None else None,
+                                shapely.union_all(np.array([l.buffer(w / 2.0 + 40.0) for l, w, _k in feats.waterways],
+                                                           dtype=object)) if feats.waterways else None) if g is not None]
+            keep = [q for q in S.polygons(water) if q.area >= 3000.0 and not any(q.intersects(g) for g in near)]
             water = shapely.union_all(np.array(keep, dtype=object)) if keep else None
         if water is not None:
             used.append("water")
@@ -497,6 +558,11 @@ def _apply_dsm(feats: Any, heights: np.ndarray, bounds: tuple[float, float, floa
         b.height_m = float(h["roof_m"])
         b.estimated = False
         n += 1
+        # a pitched roof shows as metres between the eaves and the ridge: on a house-sized footprint draw it gabled
+        pitch = float(h["roof_m"]) - float(h.get("eaves_m") or h["roof_m"])
+        if b.roof in ("", "flat") and pitch >= 2.0 and b.shape.area <= 600.0 and b.shape.area >= 0.75 * b.shape.minimum_rotated_rectangle.area:
+            b.roof = "gabled"
+            b.roof_height_m = min(pitch * 1.3, float(h["roof_m"]) * 0.6)
         for poly, top in h.get("towers") or []:
             if top - b.height_m < 4.0 or poly.is_empty:
                 continue
@@ -540,6 +606,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     elev = dem.sample(lon.ravel(), lat.ravel()).reshape(ny, nx).astype(np.float64)
     cell_m = p.cell_ground_m
     sigma = p.smooth if p.smooth >= 0 else min(6.0, max(0.0, 0.45 * dem.res_m / cell_m))
+    if dem.source.startswith("terrarium"):          # radar elevation (SRTM) has pits along shores and in its voids
+        elev, pits = _fill_pits(elev, cell_m)
+        if pits:
+            clock.log(f"{pits} false pits of the elevation filled")
     elev = _gaussian(elev, sigma)
 
     # sea: at or below 0 m and touching the border
@@ -634,6 +704,28 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                     attribution.append(msb_mod.ATTRIBUTION)
                     building_source = "osm+footprints" if had else "footprints"
                     clock.log(f"{footprints_added} buildings from the worldwide footprints, {adopted} heights taken from them")
+        # Africa, South and South-East Asia, Latin America: the roofs Google's imagery model sees, each with its height,
+        # fill what is still missing (a town nobody mapped and the first source does not cover)
+        if (p.buildings and building_source != "cadastre" and p.buildings_source == "auto" and hasattr(sources, "open_buildings")
+                and ob_mod.covers(area.bbox)):
+            try:
+                items = sources.open_buildings(area.bbox_padded(pad_m), progress=clock.log)
+            except GulliverError as exc:
+                items = []
+                notes.append(f"The building heights seen from space were not used ({exc.message}).")
+            except Exception as exc:  # noqa: BLE001
+                items = []
+                notes.append(f"The building heights seen from space could not be read ({exc}).")
+            if items:
+                clip_m = box(-area.width_m / 2 - pad_m, -area.height_m / 2 - pad_m, area.width_m / 2 + pad_m, area.height_m / 2 + pad_m)
+                extra = msb_mod.to_buildings(items, proj, clip_m)
+                had = len(feats.buildings)
+                feats.buildings, added, adopted = msb_mod.fill(feats.buildings, extra)
+                footprints_added += added
+                if added or adopted:
+                    attribution.append(ob_mod.ATTRIBUTION)
+                    building_source = "osm+footprints" if had else "footprints"
+                    clock.log(f"{added} buildings seen from space, {adopted} heights taken from them")
         lc_water = None
         landcover_used: list[str] = []
         if p.landcover and (p.green or p.zones or p.water or p.trees) and hasattr(sources, "landcover"):
@@ -873,8 +965,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                                       [_shifted(terrain, -min(0.25, p.road_depth_mm), W_mm, H_mm, 0.05)]))
     if road_shape is not None and p.roads == "engraved":
         relief_cuts.append(S.subtract(S.prism(road_shape, -1.0, over_top), [_shifted(terrain, -p.road_depth_mm, W_mm, H_mm, 0.05)]))
-    if rows_shape is not None:
-        relief_cuts.append(S.subtract(S.prism(rows_shape, -1.4, over_top), [_shifted(terrain, -ROW_DEPTH_MM, W_mm, H_mm, 0.05)]))
     if field_gaps is not None and not field_gaps.is_empty and p.color == "mono":
         relief_cuts.append(S.subtract(S.prism(field_gaps, -1.5, over_top), [_shifted(terrain, -ROW_DEPTH_MM, W_mm, H_mm, 0.05)]))
     if contour_shape is not None:
@@ -1221,6 +1311,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     solid_top = max([top, trees_solid.bounding_box()[5] if not trees_solid.is_empty() else top]
                     + [s.bounding_box()[5] for s in building_solids]) + 5.0
     terrain_body = S.union([terrain_wet, bridge_solid])
+    terrain_body.num_tri()
+    del terrain, terrain_wet                      # big meshes: only the body goes on (memory peaks in city models)
     parts: dict[str, Any] = {}
     layers_drawn: list[str] = []
     zone_shapes = {}
@@ -1286,7 +1378,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 g = g.difference(fields_shape.buffer(FIELD_GAP_MM * 1.2, join_style="mitre"))
             areas.append(("green", g))
         taken = None
-        cutters = []
         zone_shapes: dict[str, Any] = {}
         # the layers stay a hair off the walls of the buildings standing on them (a layer cut by a wall whose corner sits
         # on the layer's edge would leave two bodies touching along that corner)
@@ -1312,10 +1403,13 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             taken = g if taken is None else taken.union(g)
             cutter = S.subtract(S.prism(g, -1.0, solid_top), [lowered])
             parts[name] = S.intersect(terrain_body, cutter)
+            parts[name].num_tri()                     # evaluated now: manifold's lazy tree would keep every cutter alive
+            # the layer leaves the terrain at once, so the next one works on a lighter body and nothing big is kept
+            terrain_body = S.subtract(terrain_body, [cutter])
+            terrain_body.num_tri()
+            del cutter
             zone_shapes[name] = g
-            cutters.append(cutter)
             layers_drawn.append(name)
-        terrain_body = S.subtract(terrain_body, cutters)
         parts["terrain"] = terrain_body
         parts["buildings"] = buildings
         parts["water"] = water_solid
@@ -1325,8 +1419,26 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             parts["highlight"] = S.subtract(highlight, [ground_all]) if highlight_kind == "marker" else highlight
         if not track_raise.is_empty():
             parts["track"] = S.subtract(track_raise, [ground_all, buildings, highlight])
+        for n in ("trees", "highlight", "track"):
+            if n in parts:
+                parts[n].num_tri()
+        del ground_all, lowered
     else:
         parts["terrain"] = S.union([terrain_body, buildings, trees_solid, highlight, track_raise])
+
+    # crop rows: grooves in the fields only (cut into the whole terrain they made every later step carry thousands of
+    # strips); their floor follows a coarser copy of the ground, a millimetre a cell, which is plenty under a 0.2 mm groove
+    if rows_shape is not None:
+        clock.log("Crop rows")
+        stride = max(1, int(round(1.0 / p.resolution_mm)))
+        floor = S.heightfield(*_coarse(Z - ROW_DEPTH_MM, xs, ys, stride))
+        rows_cut = S.subtract(S.prism(rows_shape, 0.2, top + 5.0), [floor])
+        targets = ["fields", SINGLE] if p.color == "color" else ["terrain"]
+        for n in targets:
+            if n in parts:
+                parts[n] = S.subtract(parts[n], [rows_cut])
+                parts[n].num_tri()
+        del floor, rows_cut
 
     # 10. outline shape ----------------------------------------------------------------------------------------------------
     if p.shape != "rect":
@@ -1450,8 +1562,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             t["parts"] = tparts
             tiles.append(t)
 
-    parts = {n: S.clean(m) for n, m in parts.items()}
-    parts = {n: m for n, m in parts.items() if not m.is_empty()}
+    for n in list(parts):                          # one at a time: never the old and the new set of parts alive together
+        parts[n] = S.clean(parts[n])
+        if parts[n].is_empty():
+            del parts[n]
     clock.step(0.9, "Checks")
     single = parts.pop(SINGLE, None)
     for t in tiles:

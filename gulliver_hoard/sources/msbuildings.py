@@ -101,8 +101,10 @@ def to_buildings(items: list[dict[str, Any]], projector: Any, clip: Any) -> list
             continue
         h = it["height"]
         kind = "house" if (h is None and shape.area <= 200.0) or (h is not None and h <= 7.5 and shape.area <= 200.0) else "yes"
+        # a pitched roof only on a footprint that is a rectangle; a traced blob keeps a flat top (a gable on it is a spike)
+        boxy = shape.area >= 0.8 * shape.minimum_rotated_rectangle.area
         out.append(Building(shape, h if h is not None else (5.5 if shape.area <= 200.0 else 8.0), 0.0, kind, "",
-                            h is None, roof=""))
+                            h is None, roof="" if boxy else "flat"))
     return out
 
 
