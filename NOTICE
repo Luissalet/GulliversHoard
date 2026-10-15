@@ -8,6 +8,8 @@ Gulliver's Hoard builds models from open data. Credit these sources when you sha
 - Trees in Spain: detected on the PNOA orthophoto © Instituto Geográfico Nacional de España, CC BY 4.0 — https://pnoa.ign.es
 - Farm parcels in Spain: © Dirección General del Catastro, INSPIRE Cadastral Parcels download service (free reuse with attribution)
 - Building footprints worldwide: Microsoft Global ML Building Footprints, ODbL — https://github.com/microsoft/GlobalMLBuildingFootprints
+- Roofs and heights in Africa, South and South-East Asia and Latin America: Google Open Buildings 2.5D Temporal, CC BY 4.0 or
+  ODbL at the user's choice — https://sites.research.google/gr/open-buildings/temporal/
 - Tree heights worldwide: High Resolution Canopy Height Maps © Meta and World Resources Institute, CC BY 4.0 —
   https://registry.opendata.aws/dataforgood-fb-forests/
 - Land cover worldwide: © ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA
