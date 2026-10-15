@@ -19,6 +19,7 @@ from .hoard_link import family
 from .hoard_link.tokens import read_or_create_token
 from .jobs import Job, Jobs
 from .mesh.build import PART_COLORS, PART_LABELS, build
+from .worker import run_isolated
 from .outputs import write_outputs
 from .params import MAX_CELLS, PRESETS, ModelParams, suggest_tiles
 from .projects import Projects, new_id
@@ -224,11 +225,18 @@ class Services:
             current = self.projects.get(pid)
             p = ModelParams(**current["params"])
             settings = self.settings.get()
-            result = build(p, self.sources, progress=job.report, cancelled=job.cancelled, name=current["name"])
             build_id = new_id()
             folder = self.projects.build_dir(pid, build_id)
-            report = write_outputs(result, folder, name=current["name"], bed=(settings["bed_x_mm"], settings["bed_y_mm"]),
-                                   progress=job.report, lang=0 if settings["language"] == "es" else 1)
+            lang = 0 if settings["language"] == "es" else 1
+            if self.config.isolate:
+                report = run_isolated(job, {"params": p.model_dump(), "name": current["name"], "folder": str(folder),
+                                            "bed": [settings["bed_x_mm"], settings["bed_y_mm"]], "lang": lang,
+                                            "cache_dir": str(self.config.cache_dir), "servers": settings["overpass_servers"],
+                                            "fake": self.config.fake})
+            else:
+                result = build(p, self.sources, progress=job.report, cancelled=job.cancelled, name=current["name"])
+                report = write_outputs(result, folder, name=current["name"], bed=(settings["bed_x_mm"], settings["bed_y_mm"]),
+                                       progress=job.report, lang=lang)
             report["build_id"] = build_id
             self.projects.finish_build(pid, build_id, report, settings["keep_builds"])
             self.projects.update(pid, job=None)

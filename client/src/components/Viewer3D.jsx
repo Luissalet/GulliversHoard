@@ -20,6 +20,8 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.92;
+    renderer.shadowMap.enabled = true;               // buildings and trees cast shadows, as on a real model in daylight
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x10140f);
@@ -31,14 +33,19 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
     scene.add(new THREE.HemisphereLight(0xf4efe4, 0x2c2c24, 0.75));
     const sun = new THREE.DirectionalLight(0xfff4e2, 1.9);
     sun.position.set(-1, 1.6, 1.1);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(4096, 4096);
+    sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.02;
     scene.add(sun);
+    scene.add(sun.target);
     const fill = new THREE.DirectionalLight(0xbfd4ff, 0.45);
     fill.position.set(1.2, 0.6, -0.8);
     scene.add(fill);
     const root = new THREE.Group();
     root.rotation.x = -Math.PI / 2;              // the model is Z-up, three is Y-up
     scene.add(root);
-    s.current = { renderer, scene, camera, controls, root, groups: [], centre: new THREE.Vector3(), size: 100 };
+    s.current = { renderer, scene, camera, controls, root, sun, groups: [], centre: new THREE.Vector3(), size: 100 };
 
     const resize = () => {
       const w = el.clientWidth || 1;
@@ -92,6 +99,8 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
         const material = new THREE.MeshStandardMaterial({ color, roughness: part === "water" ? 0.35 : 0.85, metalness: 0.0, flatShading: true });
         const m = new THREE.Mesh(geo, material);
         m.userData.part = part;
+        m.castShadow = part !== "water";
+        m.receiveShadow = true;
         if (!groups.has(group)) groups.set(group, new THREE.Group());
         groups.get(group).add(m);
       }
@@ -109,8 +118,14 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
       });
       s.current.groups = groupInfo;
       s.current.centre = centre;
-      s.current.size = Math.max(Math.hypot(size.x, size.z), 1);   // the diagonal: what an oblique view has to fit
+      s.current.size = Math.max(size.x, size.z, 1);
       s.current.modelCentre = new THREE.Box3().setFromObject(root).getCenter(new THREE.Vector3());
+      const { sun } = s.current;
+      const reach = Math.max(size.x, size.z) * 0.75;
+      sun.position.copy(centre).add(new THREE.Vector3(-0.55, 0.9, 0.6).normalize().multiplyScalar(reach * 3));
+      sun.target.position.copy(centre);
+      Object.assign(sun.shadow.camera, { left: -reach, right: reach, top: reach, bottom: -reach, near: reach * 0.5, far: reach * 6 });
+      sun.shadow.camera.updateProjectionMatrix();
       setCamera(view);
       applyHidden(hidden);
       applyExplode(explode);
@@ -142,7 +157,7 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
       const dx = c.x - modelCentre.x;
       const dz = c.z - modelCentre.z;
       const len = Math.hypot(dx, dz) || 1;
-      const k = amount * size * 0.085;
+      const k = amount * size * 0.12;
       g.position.set((dx / len) * k, -(dz / len) * k, 0);
     }
   }
@@ -150,12 +165,10 @@ export default function Viewer3D({ url, hidden, explode = 0, view = "iso", onInf
   function setCamera(v) {
     const { camera, controls, centre, size } = s.current;
     if (!camera) return;
-    // distance that fits the model's longest side in the view (narrow views need more room)
-    const fov = (camera.fov * Math.PI) / 180;
-    const d = ((size / 2) / Math.tan(fov / 2)) * 1.08 / Math.min(1, Math.max(camera.aspect, 0.45));
-    if (v === "top") camera.position.set(centre.x, centre.y + d, centre.z + 0.001);
-    else if (v === "front") camera.position.set(centre.x, centre.y + d * 0.3, centre.z + d * 0.95);
-    else camera.position.set(centre.x - d * 0.42, centre.y + d * 0.68, centre.z + d * 0.74);
+    const d = size * 1.25;
+    if (v === "top") camera.position.set(centre.x, centre.y + d * 1.45, centre.z + 0.001);
+    else if (v === "front") camera.position.set(centre.x, centre.y + d * 0.25, centre.z + d * 1.35);
+    else camera.position.set(centre.x - d * 0.55, centre.y + d * 0.9, centre.z + d * 1.0);
     controls.target.copy(centre);
     controls.update();
   }

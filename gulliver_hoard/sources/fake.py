@@ -1,7 +1,9 @@
-"""An invented town for the demo mode (``GULLIVER_FAKE=1``) and the tests: hills, a river with a bridge, a lake with an island
-(a multipolygon whose outer ring is split in two ways), blocks of buildings with and without heights, a courtyard building,
-streets of several classes, a railway and a park. It is laid out around the centre of whatever area is asked for, in the
-same Overpass JSON the real service answers, so the whole pipeline runs without the network."""
+"""An invented town for the demo mode (``GULLIVER_FAKE=1``) and the tests: hills, a river with a bridge, a lake with an
+island (a multipolygon whose outer ring is split in two ways), blocks of buildings with and without heights, a courtyard
+building, streets of several classes, a railway with a bridge, a park with paths, a pond and trees, a forest, a church
+drawn by its 3D parts (a spire on its tower) and a house with a hipped roof. It is laid out around the centre of
+whatever area is asked for, in the same Overpass JSON the real service answers, so the whole pipeline runs without the
+network."""
 
 from __future__ import annotations
 
@@ -82,6 +84,11 @@ def town(proj: Projector) -> dict[str, Any]:
         els.append({"type": "way", "id": nid[0], "tags": tags, "geometry": geom(pts)})
         return nid[0]
 
+    def node(x, y, tags):
+        nid[0] += 1
+        lon, lat = proj.inv(x, y)
+        els.append({"type": "node", "id": nid[0], "lon": round(lon, 8), "lat": round(lat, 8), "tags": tags})
+
     def rect(cx, cy, w, h, angle=0.0):
         c, s = math.cos(angle), math.sin(angle)
         pts = [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
@@ -133,8 +140,25 @@ def town(proj: Projector) -> dict[str, Any]:
     way([(-80, -40), (-80, 60)], {"highway": "secondary", "bridge": "yes", "layer": "1", "name": "Puente Demo"})
     way([(-80, 60), (-80, 700)], {"highway": "secondary"})
     way([(-1200, 600), (1200, 650)], {"highway": "service"})
-    way([(-1500, -650), (1500, -350)], {"railway": "rail"})
-    # a park and a forest
+    # a park with paths, a pond and trees, a forest, a row of trees
     way(rect(150, 400, 260, 160, 0.2), {"leisure": "park", "name": "Parque Demo"}, closed=True)
+    way([(40, 330), (150, 400), (270, 470)], {"highway": "footway"})
+    way([(150, 400), (120, 470)], {"highway": "path"})
+    way([(200 + 25 * math.cos(t), 380 + 15 * math.sin(t)) for t in np.linspace(0, 2 * math.pi, 17)[:-1]],
+        {"natural": "water", "water": "pond"}, closed=True)
+    for k in range(14):
+        node(60 + 17 * k, 440 - 6 * (k % 3), {"natural": "tree", "height": str(8 + k % 5)})
+    way([(-480, -435), (180, -435)], {"natural": "tree_row"})
     way(rect(900, 700, 500, 400), {"landuse": "forest"}, closed=True)
+    way(rect(-420, 120, 30, 18), {"leisure": "swimming_pool"}, closed=True)
+    # a church: the outline drawn by its parts (a nave with a gabled roof, a tower with a spire on top)
+    way(rect(-620, 150, 46, 22), {"building": "church", "name": "Iglesia Demo", "height": "16"}, closed=True)
+    way(rect(-632, 150, 34, 22), {"building:part": "yes", "height": "16", "roof:shape": "gabled", "roof:height": "6"}, closed=True)
+    way(rect(-609, 150, 12, 12), {"building:part": "yes", "height": "30"}, closed=True)
+    way(rect(-609, 150, 12, 12), {"building:part": "yes", "min_height": "30", "height": "44", "roof:shape": "pyramidal"}, closed=True)
+    way(rect(-620, 230, 18, 12), {"building": "house", "roof:shape": "hipped", "roof:levels": "1", "building:levels": "2"}, closed=True)
+    # a railway bridge over the river
+    way([(600, -900), (800, 0)], {"railway": "rail"})
+    way([(800, 0), (836, 162)], {"railway": "rail", "bridge": "yes"})
+    way([(836, 162), (1000, 900)], {"railway": "rail"})
     return {"version": 0.6, "generator": "gulliver-demo", "elements": els}

@@ -176,6 +176,19 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     if green is not None and result.params.green:
         for poly in S.polygons(green):
             draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS["green"]) + (150,))
+    for name, alpha in (("rock", 200), ("snow", 235), ("rails", 255)):
+        geom = result.footprints.get(name)
+        for poly in S.polygons(geom) if geom is not None else []:
+            draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS[name]) + (alpha,))
+    paths = result.footprints.get("paths")
+    for poly in S.polygons(paths) if paths is not None else []:
+        draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS["terrain"]) + (230,))
+    trees = result.footprints.get("trees")
+    if trees is not None:
+        tc = _hex(PART_COLORS["trees"])
+        for (x, y), r in zip(*trees):
+            (cx, cy), rr = px([(x, y)])[0], max(0.8, r * scale)
+            draw.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=tc + (225,))
     off = max(1.0, size / 400)
     for shape in result.footprints.get("buildings") or []:
         for poly in S.polygons(shape):

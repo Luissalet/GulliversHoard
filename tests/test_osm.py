@@ -16,7 +16,14 @@ def test_parse_demo_town():
     f = osm.parse(town(proj), proj, 2400, 1800)
     s = f.summary()
     assert s["buildings"] > 150 and s["buildings_with_height"] > 10
-    assert s["bridges"] == 1 and s["rails"] == 1 and s["waterways"] == 2
+    assert s["bridges"] == 1 and s["rails"] == 3 and s["rail_bridges"] == 1 and s["waterways"] == 2
+    assert s["trees"] == 14 and s["tree_rows"] == 1 and s["woods_km2"] > 0.1 and s["building_parts"] == 3
+    # the church outline is drawn by its parts; the spire part starts at 30 m on the tower
+    assert not [b for b in f.buildings if b.name == "Iglesia Demo" and not b.part]
+    spire = [b for b in f.buildings if b.part and b.roof == "pyramidal"]
+    assert spire and spire[0].min_height_m == 30 and spire[0].height_m == 44
+    assert osm.roof_of({"roof:shape": "spire"}) == ("cone", None, False)
+    assert osm.roof_of({"roof:shape": "gabled", "roof:levels": "1", "roof:orientation": "across"}) == ("gabled", osm.LEVEL_M, True)
     # the lake (a multipolygon with its outer ring split in two ways) keeps the island as a hole
     lake = [g for g in osm.as_polygons(f.water) if abs(g.centroid.x + 700) < 50]
     assert lake and len(lake[0].interiors) == 1

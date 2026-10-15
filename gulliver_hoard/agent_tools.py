@@ -162,8 +162,11 @@ TOOLS: list[Tool] = [
     Tool("presets_get", _d("Presets (city, landscape, relief), default parameters and part colours. Preajustes.",
                            synonyms="opciones, parámetros por defecto"), Empty, R, lambda s, a: s.presets()),
     Tool("model_create", _d("Create a map model of a place and build it (a job). Crear maqueta.",
-                            "Required: params.lon, params.lat. Typical: width_m/height_m (ground), size_mm, preset, tiles_x/tiles_y.",
-                            synonyms="maqueta 3d, mapa imprimible, stl de un sitio, ciudad en 3d, relieve, lichtbild, terrain"),
+                            "Required: params.lon, params.lat. Typical: width_m/height_m (ground), size_mm, preset, tiles_x/tiles_y. "
+                            "Detail: trees/tree_density, roofs (auto|tagged|flat), arches, paths, rails, zones/snow_m (snow and rock), "
+                            "road_depth_mm.",
+                            synonyms="maqueta 3d, mapa imprimible, stl de un sitio, ciudad en 3d, relieve, maqueta de ciudad, terrain, "
+                                     "arboles 3d, montaña con nieve"),
          CreateArgs, WD, _create, 600.0),
     Tool("model_list", _d("The model library: name, place, status, scale, size. Lista de maquetas.", synonyms="biblioteca, mis maquetas"),
          Empty, R, _list),

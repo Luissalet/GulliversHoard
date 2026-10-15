@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Luissalet" }]
-dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "pydantic>=2.7", "httpx>=0.27", "mcp>=1.10,<2", "numpy>=1.26", "scipy>=1.11",
+dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "pydantic>=2.7", "httpx>=0.27", "mcp>=1.10,<2", "numpy>=1.26", "scipy>=1.11", "contourpy>=1.2",
                 "shapely>=2.0", "manifold3d>=3.0", "pillow>=10.1", "trimesh>=4.0"]
 
 [project.optional-dependencies]

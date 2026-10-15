@@ -267,46 +267,132 @@ def pin_holes(footprint: Any, bounds: tuple[float, float, float, float], nx: int
     return union(holes), where
 
 
+_WELDED: "dict[int, tuple[Manifold, np.ndarray, np.ndarray]]" = {}
+_WELD_CACHE = 16
+
+
 def mesh_arrays(solid: Manifold, weld: bool = True) -> tuple[np.ndarray, np.ndarray]:
     """Vertices (float32) and triangles of a solid. ``weld`` merges vertices that land on the same float32 position (manifold
-    keeps them apart in double precision, which a slicer would read as a pinched edge) and drops the triangles that collapse."""
+    keeps them apart in double precision, which a slicer would read as a pinched edge) and drops the triangles that collapse.
+    The welded arrays of the last few solids are kept (the checks, the STL, the 3MF and the preview all read them)."""
+    if weld:
+        hit = _WELDED.get(id(solid))
+        if hit is not None and hit[0] is solid:
+            return hit[1], hit[2]
     mesh = solid.to_mesh()
-    verts = np.asarray(mesh.vert_properties, dtype=np.float32)[:, :3]
-    tris = np.asarray(mesh.tri_verts, dtype=np.int64)
+    # copies: the arrays manifold hands out live in the mesh object, which is gone once this returns
+    verts = np.array(np.asarray(mesh.vert_properties)[:, :3], dtype=np.float32, copy=True, order="C")
+    tris = np.array(mesh.tri_verts, dtype=np.int64, copy=True)
     if not weld or len(verts) == 0:
         return verts, tris.astype(np.uint32)
-    uniq, inverse = np.unique(verts, axis=0, return_inverse=True)
-    if len(uniq) == len(verts):
-        return verts, tris.astype(np.uint32)
-    t = inverse.reshape(-1)[tris]
-    keep = (t[:, 0] != t[:, 1]) & (t[:, 1] != t[:, 2]) & (t[:, 0] != t[:, 2])
-    t = t[keep]
-    # a collapsed sliver can leave two copies of a face with opposite orientation: drop both
-    key = np.sort(t, axis=1)
-    _u, first, counts = np.unique(key, axis=0, return_index=True, return_counts=True)
-    if (counts > 1).any():
-        dup_keys = _u[counts > 1]
-        dup = (key[:, None, :] == dup_keys[None, :, :]).all(axis=2).any(axis=1) if len(dup_keys) < 2000 else np.isin(
-            key.view([("", key.dtype)] * 3).ravel(), dup_keys.view([("", dup_keys.dtype)] * 3).ravel())
-        t = t[~dup]
-    used = np.unique(t)
-    remap = np.full(len(uniq), -1, dtype=np.int64)
-    remap[used] = np.arange(len(used))
-    return np.ascontiguousarray(uniq[used]), remap[t].astype(np.uint32)
+    key = verts.view(np.dtype((np.void, 12))).ravel()
+    _k, first, inverse = np.unique(key, return_index=True, return_inverse=True)
+    if len(first) == len(verts):
+        out = (verts, tris.astype(np.uint32))
+    else:
+        uniq = verts[first]
+        t = inverse.reshape(-1)[tris]
+        keep = (t[:, 0] != t[:, 1]) & (t[:, 1] != t[:, 2]) & (t[:, 0] != t[:, 2])
+        t = t[keep]
+        # a collapsed sliver can leave two copies of a face with opposite orientation: drop both
+        key3 = np.ascontiguousarray(np.sort(t, axis=1))
+        flat = key3.view(np.dtype((np.void, key3.dtype.itemsize * 3))).ravel()
+        _u, inv3, counts = np.unique(flat, return_inverse=True, return_counts=True)
+        if (counts > 1).any():
+            t = t[counts[inv3.reshape(-1)] == 1]
+        used = np.unique(t)
+        remap = np.full(len(uniq), -1, dtype=np.int64)
+        remap[used] = np.arange(len(used))
+        out = (np.ascontiguousarray(uniq[used]), remap[t].astype(np.uint32))
+    if len(_WELDED) >= _WELD_CACHE:
+        _WELDED.pop(next(iter(_WELDED)))
+    _WELDED[id(solid)] = (solid, out[0], out[1])
+    return out
 
 
 def translate(solid: Manifold, dx: float, dy: float, dz: float = 0.0) -> Manifold:
     return solid if solid.is_empty() else solid.translate((dx, dy, dz))
 
 
+def open_edges(solid: Manifold) -> np.ndarray:
+    """Edges (pairs of welded vertex positions, shape (n, 2, 3)) not shared by exactly two triangles once the mesh is read
+    back by position the way a slicer reads it: where two bodies of one part touch along a line (a pinch)."""
+    verts, tris = mesh_arrays(solid)
+    if len(tris) == 0:
+        return np.zeros((0, 2, 3), dtype=np.float32)
+    edges = np.sort(np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]).astype(np.int64), axis=1)
+    uniq, counts = np.unique(edges, axis=0, return_counts=True)
+    bad = uniq[counts != 2]
+    return verts[bad] if len(bad) else np.zeros((0, 2, 3), dtype=np.float32)
+
+
+def _rod(a: np.ndarray, b: np.ndarray, r: float) -> Manifold:
+    """A thin 7-sided rod from a to b (a little past both ends)."""
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    d = b - a
+    length = float(np.linalg.norm(d))
+    if length < 1e-9:
+        return Manifold.sphere(r, 8).translate(tuple(a))
+    z = d / length
+    helper = np.array([1.0, 0.0, 0.0]) if abs(z[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    x = np.cross(helper, z)
+    x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    rod = Manifold.cylinder(length + 2 * r, r, r, 7).translate((0.0, 0.0, -r))
+    m = np.column_stack([x, y, z, a])
+    return rod.transform(m.tolist())
+
+
+def unpinch(solid: Manifold, r: float = 0.03, rounds: int = 3) -> Manifold:
+    """Separate bodies that touch along an edge (fine for the geometry kernel, but a slicer welding by position reads it as
+    a non-manifold edge) by cutting a hair-thin rod along each such edge."""
+    for _ in range(rounds):
+        if solid.is_empty():
+            return solid
+        bad = open_edges(solid)
+        if not len(bad):
+            return solid
+        solid = subtract(solid, [_rod(e[0], e[1], r) for e in bad[:2000]])
+    return solid
+
+
 def clean(solid: Manifold, min_volume: float = 1e-3) -> Manifold:
-    """Drop slivers (components with no real volume) that booleans can leave on touching faces."""
+    """Drop slivers (bodies with no real volume) that booleans can leave on touching faces, and part bodies that touch
+    along an edge. The bodies are found on the welded mesh (a part such as the green areas can hold thousands of them,
+    which manifold's own decomposition handles slowly)."""
     if solid is None or solid.is_empty():
         return EMPTY
-    comps = solid.decompose()
-    if len(comps) <= 1:
-        return solid if solid.volume() > min_volume else EMPTY
-    kept = [c for c in comps if c.volume() > min_volume]
-    if len(kept) == len(comps):
+    solid = unpinch(solid)
+    verts, tris = mesh_arrays(solid)
+    if len(tris) == 0:
+        return EMPTY
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = len(verts)
+    t = tris.astype(np.int64)
+    rows = np.concatenate([t[:, 0], t[:, 1]])
+    cols = np.concatenate([t[:, 1], t[:, 2]])
+    graph = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
+    count, labels = connected_components(graph, directed=False)
+    v = verts.astype(np.float64)[t]
+    tet = np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])) / 6.0
+    comp = labels[t[:, 0]]
+    volume = np.bincount(comp, weights=tet, minlength=count)
+    small = volume <= min_volume
+    if not small.any():
         return solid
-    return Manifold.compose(kept) if kept else EMPTY
+    if small.all():
+        return EMPTY
+    keep = ~small[comp]
+    kept = t[keep]
+    used = np.unique(kept)
+    remap = np.full(n, -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    mesh = mf.Mesh(vert_properties=np.ascontiguousarray(verts[used], dtype=np.float32),
+                   tri_verts=np.ascontiguousarray(remap[kept].astype(np.uint32)))
+    out = Manifold(mesh)
+    if out.status() != mf.Error.NoError:            # should not happen; the slow, sure way
+        comps = [c for c in solid.decompose() if c.volume() > min_volume]
+        return Manifold.compose(comps) if comps else EMPTY
+    return unpinch(out)                             # rebuilding from float32 can bring two bodies back into contact

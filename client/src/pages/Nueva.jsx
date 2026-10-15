@@ -73,8 +73,8 @@ export default function Nueva({ query }) {
       if (editId) {
         const m = await api.call("model_get", { model_id: editId });
         if (!alive) return;
-        setForm({ ...m.params });
-        setBase({ ...m.params });
+        setForm({ ...p.defaults, ...m.params });
+        setBase({ ...p.defaults, ...m.params });
         setName(m.name || "");
         setPlace(m.place || "");
         setPreset(m.preset || "");
@@ -259,7 +259,7 @@ export default function Nueva({ query }) {
           <Toggle label={t("l_waterways")} checked={form.waterways} onChange={(v) => set({ waterways: v })} />
           <Toggle label={t("l_sea")} checked={form.sea} onChange={(v) => set({ sea: v })} hint={t("l_sea_help")} />
           <Toggle label={t("l_green")} checked={form.green} onChange={(v) => set({ green: v })} />
-          <Toggle label={t("l_rails")} checked={form.rails} onChange={(v) => set({ rails: v })} />
+          <Toggle label={t("l_rails")} checked={form.rails} onChange={(v) => set({ rails: v })} hint={t("l_rails_help")} />
           <Toggle label={t("l_bridges")} checked={form.bridges} onChange={(v) => set({ bridges: v })} />
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
@@ -276,6 +276,40 @@ export default function Nueva({ query }) {
             </label>
             <NumberField id="f-contours" label={t("contours")} unit="m" step={5} min={-1} value={form.contours_m} onChange={(v) => set({ contours_m: v })} hint={t("contours_help")} />
             <NumberField id="f-wd" label={t("water_depth")} unit="mm" step={0.1} min={0.1} value={form.water_depth_mm} onChange={(v) => set({ water_depth_mm: v })} />
+            <NumberField id="f-rd" label={t("road_depth")} unit="mm" step={0.05} min={0.05} value={form.road_depth_mm} onChange={(v) => set({ road_depth_mm: v })} hint={t("road_depth_help")} />
+          </div>
+        </Group>
+
+        <Group title={t("g_detail")} icon={ICONS.layers}>
+          <Toggle label={t("l_trees")} checked={form.trees} onChange={(v) => set({ trees: v })} hint={t("l_trees_help")} />
+          <Toggle label={t("l_paths")} checked={form.paths} onChange={(v) => set({ paths: v })} hint={t("l_paths_help")} />
+          <Toggle label={t("l_arches")} checked={form.arches} onChange={(v) => set({ arches: v })} hint={t("l_arches_help")} />
+          <Toggle label={t("l_zones")} checked={form.zones} onChange={(v) => set({ zones: v })} hint={t("l_zones_help")} />
+          <Toggle label={t("l_meadows")} checked={form.meadows} onChange={(v) => set({ meadows: v })} hint={t("l_meadows_help")} />
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="label">{t("roofs")}</span>
+              <select className="field" value={form.roofs} onChange={(e) => set({ roofs: e.target.value })}>
+                {["auto", "tagged", "flat"].map((k) => <option key={k} value={k}>{t(`roofs_${k}`)}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="label">{t("buildings_source")}</span>
+              <select className="field" value={form.buildings_source} onChange={(e) => set({ buildings_source: e.target.value })}>
+                {["auto", "cadastre", "osm"].map((k) => <option key={k} value={k}>{t(`bsrc_${k}`)}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="label">{t("tree_source")}</span>
+              <select className="field" value={form.tree_source} onChange={(e) => set({ tree_source: e.target.value })}>
+                {["auto", "osm"].map((k) => <option key={k} value={k}>{t(`tsrc_${k}`)}</option>)}
+              </select>
+            </label>
+            <NumberField id="f-td" label={t("tree_density")} unit="×" step={0.1} min={0} max={3} value={form.tree_density} onChange={(v) => set({ tree_density: v })} />
+            <NumberField id="f-ts" label={t("tree_size")} unit="mm" step={0.1} min={0.5} value={form.tree_size_mm} onChange={(v) => set({ tree_size_mm: v })} />
+            <NumberField id="f-snow" label={t("snow_m")} unit="m" step={100} min={-1} value={form.snow_m} onChange={(v) => set({ snow_m: v })} hint={t("snow_help")} />
+            <NumberField id="f-mrr" label={t("max_relief")} unit="×" step={0.05} min={0.05} max={2} value={form.max_relief_ratio} onChange={(v) => set({ max_relief_ratio: v })} hint={t("max_relief_help")} />
+            <NumberField id="f-rock" label={t("rock_slope")} unit="°" step={1} min={10} max={80} value={form.rock_slope_deg} onChange={(v) => set({ rock_slope_deg: v })} />
           </div>
         </Group>
 
@@ -336,6 +370,7 @@ function Summary({ check, error, features, form, busy, onCount, onTiles, warning
       {onTiles && <button type="button" className="btn btn-sm" onClick={onTiles}><Icon d={ICONS.grid} size={13} /> {t("use_tiles", { x: check.suggested_tiles[0], y: check.suggested_tiles[1] })}</button>}
       {features ? (
         <div className="help">{t("features_line", { b: num(features.buildings, 0, lang), r: num(features.roads, 0, lang), w: num(features.water_km2, 2, lang), g: num(features.green_km2, 2, lang) })}
+          {features.trees != null && <div>{t("features_line2", { t: num(features.trees, 0, lang), p: num(features.building_parts || 0, 0, lang), f: num(features.roofs || 0, 0, lang), k: num(features.rail_bridges || 0, 0, lang) })}</div>}
           {features.landmarks?.length > 0 && <div>{t("landmarks")}: {features.landmarks.slice(0, 6).join(", ")}</div>}
         </div>
       ) : (

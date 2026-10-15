@@ -6,7 +6,7 @@ import Viewer3D from "../components/Viewer3D.jsx";
 import { StatusChip, stepLabel } from "./Biblioteca.jsx";
 import { bytes, num } from "../format.js";
 
-const PART_ORDER = ["terrain", "buildings", "water", "roads", "green", "frame"];
+const PART_ORDER = ["terrain", "buildings", "water", "roads", "rails", "green", "trees", "rock", "snow", "frame"];
 
 export default function Maqueta({ param }) {
   const { t, lang, version, notify, confirm, changed } = useApp();

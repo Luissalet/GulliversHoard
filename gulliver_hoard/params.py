@@ -15,6 +15,9 @@ Shape = Literal["rect", "circle", "hexagon", "rounded"]
 RoadStyle = Literal["engraved", "raised", "flat", "none"]
 RoadDetail = Literal["auto", "all", "local", "main", "none"]
 ColorMode = Literal["mono", "color"]
+RoofStyle = Literal["auto", "tagged", "flat"]
+BuildingSource = Literal["auto", "osm", "cadastre"]
+TreeSource = Literal["auto", "osm"]
 DemSource = Literal["auto", "ign", "terrarium"]
 
 
@@ -36,19 +39,39 @@ class ModelParams(BaseModel):
     smooth: float = Field(-1.0, ge=-1, le=10, description="Smoothing of the elevation in cells (-1 = automatic from the source resolution).")
     # layers
     buildings: bool = True
+    buildings_source: BuildingSource = Field("auto", description="auto: in Spain the cadastre's buildings (exact footprints and "
+                                                               "floors) with OpenStreetMap's 3D parts and roofs on top; "
+                                                               "elsewhere OpenStreetMap.")
     min_building_mm2: float = Field(0.6, ge=0, le=100, description="Drop buildings whose footprint is smaller than this on the model.")
     min_building_height_mm: float = Field(0.6, ge=0, le=20)
+    roofs: RoofStyle = Field("auto", description="auto: roofs mapped in OpenStreetMap plus pitched roofs on houses and churches; "
+                                                  "tagged: only mapped roofs; flat: none.")
     water: bool = True
     water_depth_mm: float = Field(0.8, ge=0.1, le=10, description="How far water surfaces sit below the banks.")
     waterways: bool = True
     sea: bool = True
     roads: RoadStyle = "engraved"
     road_detail: RoadDetail = "auto"
-    road_depth_mm: float = Field(0.4, ge=0.1, le=5)
+    road_depth_mm: float = Field(0.2, ge=0.05, le=5, description="How far engraved roads sit below the ground (raised: above).")
     min_road_mm: float = Field(0.5, ge=0.1, le=5, description="Narrowest road on the model.")
     rails: bool = True
+    rail_height_mm: float = Field(0.35, ge=0.1, le=3, description="How far railway beds stand above the ground.")
     bridges: bool = True
+    arches: bool = Field(True, description="Bridges over water stand on arches and piers (off: a solid block down to the water).")
     green: bool = True
+    paths: bool = Field(True, description="Footpaths inside parks and woods, cut out of the green layer.")
+    min_path_mm: float = Field(0.4, ge=0.2, le=3, description="Narrowest path on the model.")
+    trees: bool = Field(True, description="3D trees: mapped trees and rows, woods filled densely, parks scattered.")
+    tree_density: float = Field(1.0, ge=0.0, le=3.0, description="How thickly woods and parks are filled with trees.")
+    tree_size_mm: float = Field(1.1, ge=0.5, le=6, description="Smallest tree crown on the model.")
+    tree_source: TreeSource = Field("auto", description="auto: in Spain every tree seen on the aerial photo (PNOA), plus mapped ones; "
+                                                         "osm: mapped trees, woods filled and parks scattered.")
+    zones: bool = Field(True, description="Snow on high summits and bare rock on steep slopes as their own colours.")
+    snow_m: float = Field(-1.0, ge=-1, le=9000, description="Snow line in metres (-1 = automatic on high mountains, 0 = none).")
+    rock_slope_deg: float = Field(34.0, ge=10, le=80, description="Slopes steeper than this are bare rock (zones on).")
+    meadows: bool = Field(False, description="Colour all open land green (mountains and countryside), not only mapped parks and woods.")
+    max_relief_ratio: float = Field(0.3, ge=0.05, le=2.0, description="The relief is kept at most this share of the model's longest "
+                                                                         "side, lowering the vertical exaggeration if needed.")
     contours_m: float = Field(0.0, ge=-1, le=2000, description="Contour lines every N metres (0 = none, -1 = automatic).")
     contour_depth_mm: float = Field(0.3, ge=0.1, le=3)
     # finishing
@@ -137,11 +160,13 @@ class ModelParams(BaseModel):
 
 PRESETS = {
     "city": {"size_mm": 180.0, "z_exag": 1.5, "building_exag": 1.0, "buildings": True, "roads": "engraved", "road_detail": "auto",
-             "contours_m": 0.0, "green": True, "water": True, "rails": True, "resolution_mm": 0.3},
-    "landscape": {"size_mm": 200.0, "z_exag": 2.0, "building_exag": 1.0, "buildings": False, "roads": "engraved", "road_detail": "main",
-                  "contours_m": -1.0, "green": True, "water": True, "rails": False, "resolution_mm": 0.4},
+             "contours_m": 0.0, "green": True, "water": True, "rails": True, "resolution_mm": 0.3, "trees": True, "roofs": "auto"},
+    "landscape": {"size_mm": 200.0, "building_exag": 1.0, "buildings": False, "roads": "engraved", "road_detail": "main",
+                  "contours_m": -1.0, "green": True, "water": True, "rails": False, "resolution_mm": 0.4, "trees": True,
+                  "zones": True, "paths": False, "meadows": True, "z_exag": 1.5},
     "relief": {"size_mm": 200.0, "z_exag": 2.5, "buildings": False, "roads": "none", "contours_m": 0.0, "green": False,
-               "water": True, "waterways": True, "rails": False, "color": "mono", "resolution_mm": 0.35},
+               "water": True, "waterways": True, "rails": False, "color": "mono", "resolution_mm": 0.35, "trees": False,
+               "zones": False},
 }
 
 MAX_CELLS = 3_000_000

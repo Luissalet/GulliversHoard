@@ -21,6 +21,7 @@ class GulliverError(AppError):
         "unavailable": 503,
         "source_failed": 502,
         "cancelled": 409,
+        "crashed": 500,
     }
 
     def __init__(self, code: str, message: str, hint: str = "", *, status: int | None = None, **details: Any):

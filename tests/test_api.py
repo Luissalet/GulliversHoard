@@ -137,3 +137,23 @@ def test_agent_route_needs_the_token(client, services):
     assert client.post("/api/agent/call", json={"name": "model_list", "arguments": {}}).status_code in (401, 403)
     r = client.post("/api/agent/call", json={"name": "model_list", "arguments": {}}, headers={"Authorization": f"Bearer {services.token}"})
     assert r.status_code == 200
+
+
+def test_a_build_in_its_own_process_reports_progress_and_finishes(tmp_path):
+    """The app builds in a child process so the web server stays responsive; the same path with the demo town."""
+    from gulliver_hoard.config import Config
+    from gulliver_hoard.services import Services
+
+    cfg = Config(data_dir=tmp_path / "iso", fake=True, background=False, isolate=True)
+    s = Services(cfg)
+    try:
+        m = s.create("Aislada", {"lon": -3.70, "lat": 40.42, "width_m": 1200, "height_m": 900, "size_mm": 60,
+                                 "resolution_mm": 0.6})
+        rec = s.projects.get(m["id"])
+        assert rec["status"] == "ready", rec
+        report = s.projects.report(m["id"])
+        assert report["check"]["watertight"] and report["files"]["3mf"]
+        job = s.jobs.get(s.jobs.list()[0]["id"])
+        assert job["state"] == "done" and any("Terrain solid" in line for line in job["log"])
+    finally:
+        s.stop()

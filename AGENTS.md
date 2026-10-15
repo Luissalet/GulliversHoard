@@ -19,7 +19,7 @@ GULLIVER_FAKE=1 python -m gulliver_hoard     # the invented town, no network
 - New layers or parameters go in `ModelParams` (validated, with a description) and in the UI form, the i18n table (castellano de España first, English second) and the README in both languages.
 - Network goes through `sources/http.Fetcher` with its cache. The tests never touch the network: use `FakeSources` or an `httpx.MockTransport`.
 - `hoard_link/` is vendored and byte-identical to upstream HoardLink: never edit it here.
-- No taglines, no names of other products in the interface. Map data must keep its attribution (OpenStreetMap ODbL, IGN CC BY 4.0, Terrarium).
+- No taglines, no names of other products in the interface. Map data must keep its attribution (OpenStreetMap ODbL, IGN CC BY 4.0 for the MDT and the PNOA photo, Catastro, Terrarium).
 
 ## Before finishing a change
 

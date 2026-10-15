@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from . import aerial as _aerial
+from . import catastro as _catastro
 from . import dem as _dem
 from . import geocode as _geocode
 from . import osm as _osm
@@ -24,6 +26,20 @@ class Sources:
     def osm(self, bbox, *, progress: Optional[Callable[[str], None]] = None, cancelled: Optional[Callable[[], bool]] = None,
             rounds: int = 3) -> dict[str, Any]:
         return _osm.fetch_raw(self.fetcher, bbox, self.overpass_servers, progress=progress, cancelled=cancelled, rounds=rounds)
+
+    def catastro(self, bbox, *, progress: Optional[Callable[[str], None]] = None,
+                 cancelled: Optional[Callable[[], bool]] = None) -> Optional[list[dict[str, Any]]]:
+        """Building parts from the Spanish cadastre, or None where it has no data."""
+        if not _catastro.covers(bbox):
+            return None
+        return _catastro.fetch_parts(self.fetcher, bbox, progress=progress, cancelled=cancelled)
+
+    def aerial_trees(self, bbox, projector, *, progress: Optional[Callable[[str], None]] = None) -> Optional[list]:
+        """Trees found on the aerial photo (Spain), or None where there is no photo to read."""
+        if not _aerial.covers(bbox):
+            return None
+        rgb, box = _aerial.fetch(self.fetcher, bbox, progress=progress)
+        return _aerial.trees(rgb, box, projector)
 
     def search(self, query: str, limit: int = 6, language: str = "es") -> list[dict[str, Any]]:
         return _geocode.search(self.fetcher, query, limit, language)

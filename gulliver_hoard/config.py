@@ -14,6 +14,7 @@ from .hoard_link.appconfig import AppPaths, env_flag, env_int, env_str
 from .hoard_link.atomic import read_json, write_json_atomic
 from .hoard_link.guard import parse_allowed_hosts
 from .sources.osm import DEFAULT_SERVERS
+from .worker import isolate_default
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,6 +43,7 @@ class Config:
     data_dir_configured: bool = False
     fake: bool = False              # demo/tests: an invented town, no network
     background: bool = True         # the job worker thread; tests may run jobs inline
+    isolate: bool = False           # builds in a child process (the app does this unless in demo mode)
 
     @property
     def paths(self) -> AppPaths:
@@ -76,6 +78,7 @@ class Config:
             allowed_hosts=tuple(parse_allowed_hosts(os.environ.get("GULLIVER_ALLOWED_HOSTS", ""))),
             data_dir_configured=bool(data_env),
             fake=env_flag("GULLIVER_FAKE"),
+            isolate=isolate_default(env_flag("GULLIVER_FAKE")),
         )
 
 

@@ -1,5 +1,7 @@
-"""What is on the ground, from OpenStreetMap through the Overpass API: buildings with their heights, water (lakes, reservoirs,
-river areas, docks), rivers and streams as lines, roads by class (with bridges and tunnels), railways and green areas.
+"""What is on the ground, from OpenStreetMap through the Overpass API: buildings with their heights and roof shapes (and
+their 3D parts: towers, spires, domes), water (lakes, ponds, pools, fountains, reservoirs, river areas, docks), rivers and
+streams as lines, roads and paths by class (with bridges and tunnels), railways (with bridges), green areas split into
+woods and parks, and single trees and rows of trees.
 
 Relations (multipolygons) are assembled properly: their member ways are stitched into closed rings, outer rings are united
 and inner rings cut out, so a lake with islands or a building with a courtyard keeps its shape. Everything is returned in
@@ -17,7 +19,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import numpy as np
 import shapely
-from shapely.geometry import LineString, MultiPolygon, Polygon, box
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 
 from ..errors import GulliverError
@@ -43,6 +45,12 @@ LINK_OF = {"motorway_link": "motorway", "trunk_link": "trunk", "primary_link": "
            "tertiary_link": "tertiary"}
 RAIL_KINDS = {"rail", "light_rail", "tram", "subway", "narrow_gauge", "monorail", "funicular"}
 WATERWAY_WIDTH_M = {"river": 20.0, "canal": 12.0, "stream": 3.0, "drain": 2.0, "ditch": 1.5}
+WOOD_TAGS = {"landuse": {"forest"}, "natural": {"wood"}}
+PARK_TAGS = {"leisure": {"park", "garden", "nature_reserve", "recreation_ground"}, "landuse": {"cemetery", "orchard", "village_green"}}
+ROOF_SHAPES = {"flat", "gabled", "hipped", "pyramidal", "dome", "onion", "cone", "skillion", "round", "gambrel", "mansard",
+               "half-hipped", "saltbox", "spire"}
+ROCK_TAGS = {"natural": {"bare_rock", "scree", "shingle"}}
+ICE_TAGS = {"natural": {"glacier"}}
 GREEN_TAGS = {
     "leisure": {"park", "garden", "pitch", "golf_course", "nature_reserve", "playground", "recreation_ground"},
     "landuse": {"forest", "grass", "meadow", "recreation_ground", "village_green", "cemetery", "orchard", "vineyard", "allotments"},
@@ -63,11 +71,15 @@ LANDMARK_TYPES = {"church", "cathedral", "chapel", "mosque", "synagogue", "templ
 @dataclass
 class Building:
     shape: Any            # shapely Polygon/MultiPolygon in metres
-    height_m: float
+    height_m: float       # to the top of the roof
     min_height_m: float
     kind: str
     name: str = ""
     estimated: bool = False
+    roof: str = "flat"    # one of ROOF_SHAPES
+    roof_height_m: Optional[float] = None    # None: worked out from the footprint for a pointed roof
+    roof_across: bool = False                # gabled ridge across the long side instead of along it
+    part: bool = False    # a building:part (a tower, a spire...) rather than a whole building
 
 
 @dataclass
@@ -87,8 +99,14 @@ class Features:
     water: Any = None             # Polygon/MultiPolygon (areas)
     waterways: list[tuple[Any, float, str]] = field(default_factory=list)   # (line, width_m, kind)
     roads: list[Road] = field(default_factory=list)
-    rails: list[Any] = field(default_factory=list)      # lines
-    green: Any = None             # Polygon/MultiPolygon
+    rails: list[Road] = field(default_factory=list)
+    green: Any = None             # Polygon/MultiPolygon (all vegetation)
+    woods: Any = None             # the part of ``green`` that is woodland (dense trees)
+    parks: Any = None             # the part of ``green`` that is a park or garden (scattered trees)
+    rock: Any = None              # bare rock, scree, shingle
+    ice: Any = None               # glaciers
+    trees: list[tuple[float, float, float, float]] = field(default_factory=list)   # mapped trees: (x, y, height_m, crown_m)
+    tree_rows: list[Any] = field(default_factory=list)  # lines
     landmarks: list[dict[str, Any]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
 
@@ -101,6 +119,14 @@ class Features:
             "roads": len(self.roads),
             "bridges": sum(1 for r in self.roads if r.bridge),
             "rails": len(self.rails),
+            "rail_bridges": sum(1 for r in self.rails if r.bridge),
+            "building_parts": sum(1 for b in self.buildings if b.part),
+            "roofs": sum(1 for b in self.buildings if b.roof not in ("", "flat")),
+            "trees": len(self.trees),
+            "tree_rows": len(self.tree_rows),
+            "woods_km2": round((self.woods.area if self.woods is not None else 0.0) / 1e6, 4),
+            "rock_km2": round((self.rock.area if self.rock is not None else 0.0) / 1e6, 4),
+            "glacier_km2": round((self.ice.area if self.ice is not None else 0.0) / 1e6, 4),
             "green_km2": round((self.green.area if self.green is not None else 0.0) / 1e6, 4),
             "landmarks": [l["name"] for l in self.landmarks[:12]],
         }
@@ -112,8 +138,12 @@ def build_query(bbox: tuple[float, float, float, float], timeout: int = 180) -> 
     green = "".join(f'way["{k}"~"^({"|".join(sorted(v))})$"];relation["{k}"~"^({"|".join(sorted(v))})$"];' for k, v in GREEN_TAGS.items())
     return (f"[out:json][timeout:{timeout}][maxsize:536870912][bbox:{b}];("
             'way["building"];relation["building"];'
+            'way["building:part"];relation["building:part"];'
             'way["natural"="water"];relation["natural"="water"];'
             'way["water"];relation["water"];'
+            'way["leisure"="swimming_pool"];way["amenity"="fountain"];'
+            'node["natural"="tree"];way["natural"="tree_row"];'
+            'way["natural"~"^(bare_rock|scree|shingle|glacier)$"];relation["natural"~"^(bare_rock|scree|shingle|glacier)$"];'
             'way["waterway"~"^(riverbank|dock)$"];relation["waterway"="riverbank"];'
             'way["landuse"~"^(reservoir|basin)$"];relation["landuse"~"^(reservoir|basin)$"];'
             'way["waterway"~"^(river|stream|canal|drain|ditch)$"];'
@@ -345,13 +375,28 @@ def building_height(tags: dict[str, str]) -> tuple[float, float, bool]:
     return h, max(0.0, min(min_h, h - 1.0)), estimated
 
 
-def _is_green(tags: dict[str, str]) -> bool:
-    return any(tags.get(k) in v for k, v in GREEN_TAGS.items())
+def _is_green(tags: dict[str, str], table: dict[str, set[str]] = GREEN_TAGS) -> bool:
+    return any(tags.get(k) in v for k, v in table.items())
 
 
 def _is_water_area(tags: dict[str, str]) -> bool:
     return (tags.get("natural") == "water" or "water" in tags or tags.get("waterway") in ("riverbank", "dock")
-            or tags.get("landuse") in ("reservoir", "basin"))
+            or tags.get("landuse") in ("reservoir", "basin") or tags.get("leisure") == "swimming_pool"
+            or tags.get("amenity") == "fountain")
+
+
+def roof_of(tags: dict[str, str]) -> tuple[str, Optional[float], bool]:
+    """(shape, height in metres or None, ridge across) from roof:shape / roof:height / roof:levels / roof:orientation. An
+    untagged roof comes back as "" (the build decides: flat, or pitched on houses)."""
+    shape = (tags.get("roof:shape") or "").strip().lower().replace("_", "-")
+    if shape == "spire":
+        shape = "cone"
+    if shape and shape not in ROOF_SHAPES:
+        shape = "gabled" if shape in ("double-saltbox", "quadruple-saltbox", "crosspitched", "sawtooth") else "flat"
+    height = _num(tags.get("roof:height"))
+    if height is None and _num(tags.get("roof:levels")):
+        height = (_num(tags.get("roof:levels")) or 0.0) * LEVEL_M
+    return shape, height, (tags.get("roof:orientation") or "").lower() == "across"
 
 
 def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: float, pad_m: float = 0.0) -> Features:
@@ -359,7 +404,8 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     proj = _Proj(projector)
     clip = box(-width_m / 2 - pad_m, -height_m / 2 - pad_m, width_m / 2 + pad_m, height_m / 2 + pad_m)
     feats = Features()
-    water_polys, green_polys = [], []
+    water_polys, green_polys, wood_polys, park_polys, rock_polys, ice_polys = [], [], [], [], [], []
+    trees: list[tuple[float, float, float, float]] = []
     seen_building_ways: set[int] = set()
     for el in data.get("elements", []):
         if el.get("type") == "relation":
@@ -371,7 +417,7 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
         tags = el.get("tags") or {}
         kind = el.get("type")
         if kind == "relation":
-            if tags.get("type") not in ("multipolygon", None, "building"):
+            if tags.get("type") not in ("multipolygon", None):      # type=building only groups an outline and its parts
                 continue
             shape = _multipolygon(proj, el)
             if shape is None:
@@ -383,18 +429,31 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
             closed = len(coords) >= 4 and coords[0] == coords[-1]
             shape = proj.polygon(coords) if closed else None
             line = proj.line(coords)
+        elif kind == "node":
+            if tags.get("natural") == "tree" and "lon" in el and "lat" in el:
+                x, y = projector.fwd(float(el["lon"]), float(el["lat"]))
+                if clip.contains(Point(x, y)):
+                    trees.append((float(x), float(y), _num(tags.get("height")) or 0.0, _num(tags.get("diameter_crown")) or 0.0))
+            continue
         else:
             continue
 
-        if "building" in tags and tags.get("building") not in ("no",):
-            if kind == "way" and (el.get("id") in seen_building_ways or shape is None):
+        is_building = "building" in tags and tags.get("building") not in ("no",)
+        is_part = tags.get("building:part") not in (None, "no") and not is_building
+        if is_building or is_part:
+            if kind == "way" and ((is_building and el.get("id") in seen_building_ways) or shape is None):
                 continue
             g = shape.intersection(clip) if shape is not None else None
             if g is None or g.is_empty or g.area < 1.0:
                 continue
             h, mh, est = building_height(tags)
             name = tags.get("name", "")
-            feats.buildings.append(Building(g, h, mh, tags.get("building", "yes"), name, est))
+            roof, roof_h, across = roof_of(tags)
+            kind_b = tags.get("building") if is_building else tags.get("building:part", "yes")
+            feats.buildings.append(Building(g, h, mh, kind_b or "yes", name, est,
+                                            roof=roof, roof_height_m=roof_h, roof_across=across, part=is_part))
+            if is_part:
+                continue
             notable = ("wikidata" in tags or "wikipedia" in tags or "historic" in tags or tags.get("tourism") in ("attraction", "museum")
                        or tags.get("building") in LANDMARK_TYPES or tags.get("amenity") == "place_of_worship" or h >= 40)
             if name and notable:
@@ -404,6 +463,10 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
         if _is_water_area(tags) and (kind == "relation" or shape is not None):
             if shape is not None:
                 water_polys.append(shape)
+            continue
+        if kind == "way" and tags.get("natural") == "tree_row":
+            if line is not None:
+                feats.tree_rows.append(line)
             continue
         if kind == "way" and tags.get("waterway") in WATERWAY_WIDTH_M:
             w = _num(tags.get("width")) or WATERWAY_WIDTH_M[tags["waterway"]]
@@ -422,19 +485,41 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
                                     name=tags.get("name", "")))
             continue
         if kind == "way" and tags.get("railway") in RAIL_KINDS:
-            if tags.get("tunnel") not in (None, "no"):
+            if tags.get("tunnel") not in (None, "no") or tags.get("layer", "0").startswith("-"):
                 continue
-            feats.rails.append(line)
+            gauge = 3.0 if tags["railway"] in ("tram", "funicular", "monorail", "narrow_gauge") else 4.5
+            feats.rails.append(Road(line, tags["railway"], gauge, 0, bridge=tags.get("bridge") not in (None, "no"),
+                                    name=tags.get("name", "")))
+            continue
+        if _is_green(tags, ROCK_TAGS) and shape is not None:
+            rock_polys.append(shape)
+            continue
+        if _is_green(tags, ICE_TAGS) and shape is not None:
+            ice_polys.append(shape)
             continue
         if _is_green(tags) and shape is not None:
             green_polys.append(shape)
+            if _is_green(tags, WOOD_TAGS):
+                wood_polys.append(shape)
+            elif _is_green(tags, PARK_TAGS):
+                park_polys.append(shape)
 
     feats.water = _valid(unary_union(water_polys).intersection(clip)) if water_polys else None
     feats.green = _valid(unary_union(green_polys).intersection(clip)) if green_polys else None
-    if feats.green is not None and feats.water is not None:
-        feats.green = _valid(feats.green.difference(feats.water))
+    feats.woods = _valid(unary_union(wood_polys).intersection(clip)) if wood_polys else None
+    feats.rock = _valid(unary_union(rock_polys).intersection(clip)) if rock_polys else None
+    feats.ice = _valid(unary_union(ice_polys).intersection(clip)) if ice_polys else None
+    feats.parks = _valid(unary_union(park_polys).intersection(clip)) if park_polys else None
+    if feats.water is not None:
+        for name in ("green", "woods", "parks"):
+            g = getattr(feats, name)
+            if g is not None:
+                setattr(feats, name, _valid(g.difference(feats.water)))
+    feats.trees = trees
+    feats.tree_rows = [l for l in feats.tree_rows if l.intersects(clip)]
+    feats.buildings = _drop_outlines_with_parts(feats.buildings)
     feats.roads = [r for r in feats.roads if r.line is not None and r.line.intersects(clip)]
-    feats.rails = [r for r in feats.rails if r is not None and r.intersects(clip)]
+    feats.rails = [r for r in feats.rails if r.line is not None and r.line.intersects(clip)]
     feats.waterways = [w for w in feats.waterways if w[0] is not None and w[0].intersects(clip)]
     landmarks.sort(key=lambda l: (l["rank"], -l["height_m"], -l["area_m2"]))
     seen_names: set[str] = set()
@@ -442,6 +527,25 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     feats.landmarks = landmarks
     feats.counts = {"elements": len(data.get("elements", []))}
     return feats
+
+
+def _drop_outlines_with_parts(buildings: list[Building]) -> list[Building]:
+    """A building mapped with 3D parts is drawn from its parts: its outline goes when the parts cover most of it (an outline
+    with a single tower part keeps the outline, and the tower rises out of it)."""
+    parts = [b for b in buildings if b.part]
+    if not parts:
+        return buildings
+    tree = shapely.STRtree([p.shape for p in parts])
+    out = []
+    for b in buildings:
+        if not b.part:
+            idx = tree.query(b.shape, predicate="intersects")
+            if len(idx):
+                covered = unary_union([parts[i].shape for i in idx]).intersection(b.shape).area
+                if covered >= 0.6 * b.shape.area:
+                    continue
+        out.append(b)
+    return out
 
 
 def as_polygons(geom: Any) -> list[Polygon]:

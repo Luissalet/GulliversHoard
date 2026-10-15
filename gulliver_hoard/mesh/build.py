@@ -1,11 +1,11 @@
 """From parameters to solids: elevation + OpenStreetMap -> the parts of a printable model (terrain, buildings, water, roads,
 green, frame), optionally cut into tiles with pin holes, every part a closed manifold.
 
-Order of work: elevation grid (smoothed to the source's real resolution), sea from the elevation, roads / rails / contour
-lines engraved or raised in the grid, the terrain solid, water cut into it at a flat level per piece (lakes stay flat, long
-rivers step down), bridges over water, buildings standing on the lowest point of their footprint, then the outline shape,
-the frame, the text on the bottom, the tiles and their pin holes. In colour mode the same solid is partitioned into parts
-(one per filament) that fit each other exactly."""
+Order of work: elevation grid (smoothed to the source's real resolution), sea traced from the elevation, the terrain
+solid with roads / rails / contour lines cut or raised along their real outlines, water cut into it at a flat level per
+piece (lakes stay flat, long rivers step down), bridges over water, buildings standing on the lowest point of their
+footprint, then the outline shape, the frame, the text on the bottom, the tiles and their pin holes. In colour mode the
+same solid is partitioned into parts (one per filament) that fit each other exactly."""
 
 from __future__ import annotations
 
@@ -17,13 +17,16 @@ from typing import Any, Callable, Optional
 import numpy as np
 import shapely
 from shapely import affinity
-from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
 from ..errors import Cancelled, GulliverError
 from ..geo import format_coord, nice_scale
 from ..params import MAX_CELLS, ModelParams
+from ..sources import aerial as aerial_mod
+from ..sources import catastro as catastro_mod
 from ..sources import osm as osm_mod
+from . import detail
 from . import solids as S
 
 PART_COLORS = {
@@ -31,7 +34,11 @@ PART_COLORS = {
     "buildings": "#F2EEE6",
     "water": "#5E9FD1",
     "roads": "#8A8478",
+    "rails": "#6B6660",
     "green": "#7FA56A",
+    "trees": "#3E7A3A",
+    "rock": "#9A968F",
+    "snow": "#F7F7F4",
     "frame": "#3A3A3A",
 }
 PART_LABELS = {
@@ -39,10 +46,20 @@ PART_LABELS = {
     "buildings": ("Edificios", "Buildings"),
     "water": ("Agua", "Water"),
     "roads": ("Carreteras", "Roads"),
+    "rails": ("Vías del tren", "Railways"),
     "green": ("Zonas verdes", "Green areas"),
+    "trees": ("Árboles", "Trees"),
+    "rock": ("Roca", "Rock"),
+    "snow": ("Nieve", "Snow"),
     "frame": ("Marco", "Frame"),
 }
 SKIN_MM = 0.6                 # thickness of a colour layer on top of the terrain
+BRIDGE_DECK_MM = 0.5          # thickness of a bridge deck over its arches
+ROAD_GAP_MM = 0.18            # ground narrower than twice this between two roads becomes road
+ROAD_ISLAND_MM2 = 0.8         # traffic islands smaller than this become road
+MIN_BUILDING_ABS_MM2 = 0.06   # below this a building is never drawn, whatever block it belongs to
+CONTOUR_MM = 0.5              # width of an engraved contour line
+PATH_KINDS = {"footway", "path", "cycleway", "steps", "bridleway", "track", "pedestrian"}
 WATER_PIECE_M = 300.0         # a water body longer than this is split so its level can step down
 LABEL_DEPTH_MM = 0.6
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
@@ -130,13 +147,6 @@ def _inside(geom: Any, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     return out
 
 
-def _dilate(mask: np.ndarray, cells: int) -> np.ndarray:
-    if cells <= 0:
-        return mask
-    from scipy.ndimage import binary_dilation
-    return binary_dilation(mask, iterations=cells)
-
-
 def _unpinch(geom: Any, d: float = 0.02) -> Any:
     """Open the shape by ``d`` mm: parts that touch at a single point (a pinch, which becomes an edge shared by four faces
     in the solid) come apart; nothing thicker than 2 d changes."""
@@ -144,6 +154,81 @@ def _unpinch(geom: Any, d: float = 0.02) -> Any:
         return geom
     out = geom.buffer(-d, join_style="mitre").buffer(d * 0.9, join_style="round", quad_segs=2)   # round: corners never meet again
     return out if not out.is_empty else None
+
+
+def _padded(F: np.ndarray, xs: np.ndarray, ys: np.ndarray, pad: float = 1.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The grid with one more row/column on every side ``pad`` mm out (edge values), so shapes traced from it reach past
+    the model's border instead of stopping on it (a wall exactly on the border would coincide with the terrain's)."""
+    return (np.pad(F, 1, mode="edge"), np.concatenate([[xs[0] - pad], xs, [xs[-1] + pad]]),
+            np.concatenate([[ys[0] - pad], ys, [ys[-1] + pad]]))
+
+
+def _below(F: np.ndarray, xs: np.ndarray, ys: np.ndarray, level: float) -> Any:
+    """Polygons where the grid is below ``level``, traced with marching squares (interpolated, not cell by cell)."""
+    import contourpy
+    F, xs, ys = _padded(F, xs, ys)
+    lo = float(np.nanmin(F))
+    if lo >= level:
+        return None
+    gen = contourpy.contour_generator(xs, ys, F, fill_type=contourpy.FillType.OuterOffset)
+    points, offsets = gen.filled(lo - 1.0, level)
+    polys = []
+    for pts, offs in zip(points, offsets):
+        rings = [pts[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
+        rings = [r for r in rings if len(r) >= 4]
+        if rings:
+            poly = Polygon(rings[0], rings[1:]).buffer(0)
+            if not poly.is_empty:
+                polys.append(poly)
+    if not polys:
+        return None
+    out = shapely.union_all(np.array(polys, dtype=object)).simplify(0.02)
+    return out if not out.is_empty else None
+
+
+def _contour_lines(F: np.ndarray, xs: np.ndarray, ys: np.ndarray, levels: list[float]) -> list[Any]:
+    """Contour lines of the grid at ``levels`` as shapely lines (marching squares)."""
+    import contourpy
+    F, xs, ys = _padded(F, xs, ys)
+    gen = contourpy.contour_generator(xs, ys, F, line_type=contourpy.LineType.Separate)
+    out = []
+    for level in levels:
+        for seg in gen.lines(level):
+            if len(seg) >= 2:
+                line = LineString(seg).simplify(0.03)
+                if line.length > 0.5:
+                    out.append(line)
+    return out
+
+
+def _shifted(solid: Any, dz: float, W: float, H: float, grow: float) -> Any:
+    """A copy of the terrain moved ``dz`` up and stretched ``grow`` mm out on every side (negative: shrunk in), so its walls
+    never sit on the original's walls."""
+    return solid.translate((-W / 2.0, -H / 2.0, 0.0)).scale(((W + 2 * grow) / W, (H + 2 * grow) / H, 1.0)).translate(
+        (W / 2.0, H / 2.0, dz))
+
+
+def _close(geom: Any, gap: float, min_hole: float) -> Any:
+    """Morphological closing (gaps narrower than ``2 gap`` filled) and holes smaller than ``min_hole`` mm² filled."""
+    if geom is None or geom.is_empty:
+        return geom
+    out = geom.buffer(gap, quad_segs=3).buffer(-gap, quad_segs=3)
+    polys = []
+    for poly in S.polygons(out):
+        holes = [h for h in poly.interiors if Polygon(h).area >= min_hole]
+        polys.append(Polygon(poly.exterior, holes))
+    return shapely.union_all(np.array(polys, dtype=object)) if polys else out
+
+
+def _supported(i: int, cands: list[tuple[Any, Any]], tree: Any, min_height_m: float) -> bool:
+    """Whether a building part that starts ``min_height_m`` up stands on other parts at least that tall (else it is drawn
+    down to the ground instead of floating)."""
+    shape = cands[i][1]
+    under = [j for j in tree.query(shape, predicate="intersects") if j != i and cands[j][0].height_m >= min_height_m - 0.5]
+    if not under:
+        return False
+    covered = shapely.union_all(np.array([cands[j][1] for j in under], dtype=object)).intersection(shape).area
+    return covered >= 0.5 * shape.area
 
 
 def _line_buffer(lines: list[tuple[Any, float]]) -> Any:
@@ -203,6 +288,12 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     ref = 0.0 if sea.any() else float(np.nanmin(land))
     relief_m = float(np.nanmax(land) - np.nanmin(land)) if land.size else 0.0
     kz = k * p.z_exag
+    span_mm = (float(np.nanmax(land)) - ref) * kz if land.size else 0.0
+    cap_mm = p.max_relief_ratio * max(W_mm, H_mm)
+    if span_mm > cap_mm > 0:                      # a mountain range drawn at the city exaggeration would be a forest of needles
+        kz *= cap_mm / span_mm
+        notes.append(f"Vertical exaggeration lowered to x{kz / k:.2f} so the relief stays within "
+                     f"{p.max_relief_ratio:.0%} of the model's width.")
     base = p.base_mm
     if p.water and base < p.water_depth_mm + 1.0:
         base = p.water_depth_mm + 1.0
@@ -221,6 +312,23 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         attribution.append(osm_mod.ATTRIBUTION)
         clock.log(f"{len(feats.buildings)} buildings, {len(feats.roads)} roads, {len(feats.waterways)} waterways, "
                   f"{len(feats.rails)} rails")
+    building_source = "osm"
+    if p.buildings and p.buildings_source != "osm" and hasattr(sources, "catastro"):
+        try:
+            parts = sources.catastro(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
+        except GulliverError as exc:
+            parts = None
+            notes.append(f"The cadastre did not answer ({exc.message}); buildings from OpenStreetMap.")
+        if parts:
+            clip_m = box(-area.width_m / 2 - pad_m, -area.height_m / 2 - pad_m, area.width_m / 2 + pad_m, area.height_m / 2 + pad_m)
+            cad = catastro_mod.to_buildings(parts, proj, clip_m)
+            if cad:
+                feats.buildings = catastro_mod.merge(feats.buildings, cad)
+                building_source = "cadastre"
+                attribution.append(catastro_mod.ATTRIBUTION)
+                clock.log(f"{len(cad)} building parts from the cadastre")
+        elif p.buildings_source == "cadastre":
+            notes.append("The cadastre has no buildings here (outside Spain, or Navarre / the Basque Country); OpenStreetMap's were used.")
     model_box = box(0.0, 0.0, W_mm, H_mm)
     footprint = S.outline(p.shape, W_mm, H_mm)
     to_mm = lambda g: _to_mm(g, k, area.width_m, area.height_m)  # noqa: E731
@@ -228,22 +336,56 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # 3. roads, rails --------------------------------------------------------------------------------------------------
     clock.step(0.25, "Roads and contour lines")
     rank = p.effective_road_rank()
-    road_lines, bridge_lines = [], []
+    road_lines, bridge_lines, rail_lines, path_lines = [], [], [], []
     for r in feats.roads:
-        if r.rank > rank or r.tunnel or r.line is None:
+        if r.tunnel or r.line is None:
+            continue
+        if r.rank > rank or p.roads == "none":
+            if p.paths and r.kind in PATH_KINDS:
+                path_lines.append((to_mm(r.line), max(r.width_m * k, p.min_path_mm)))
             continue
         width = max(r.width_m * k, p.min_road_mm)
         line = to_mm(r.line)
         road_lines.append((line, width))
         if r.bridge:
-            bridge_lines.append((line, width))
-    if p.rails and p.roads != "none":
+            bridge_lines.append((line, width, "road"))
+    if p.rails:
         for rail in feats.rails:
-            road_lines.append((to_mm(rail), max(4.0 * k, p.min_road_mm * 0.8)))
+            if rail.kind == "tram" or rail.line is None:      # trams run in the street
+                continue
+            line = to_mm(rail.line)
+            width = max(rail.width_m * k, p.min_road_mm * 0.9)
+            rail_lines.append((line, width))
+            if rail.bridge:
+                bridge_lines.append((line, width, "rail"))
     roads_geom = _line_buffer(road_lines) if road_lines else None
     if roads_geom is not None:
         roads_geom = roads_geom.intersection(model_box.buffer(1.0))
+    road_shape = None
+    if roads_geom is not None and not roads_geom.is_empty and p.roads != "none":
+        # close the slivers of ground left between roads that nearly touch (they print as needles) and fill traffic islands
+        # too small to print; then the outline is what is cut
+        roads_geom = _close(roads_geom, ROAD_GAP_MM, ROAD_ISLAND_MM2).intersection(model_box.buffer(1.0))
+        road_shape = _unpinch(roads_geom)
     road_mask = _inside(roads_geom, X, Y) if roads_geom is not None and p.roads != "none" else np.zeros_like(sea)
+    rail_shape = None
+    if rail_lines:
+        rg = _line_buffer(rail_lines).intersection(model_box.buffer(1.0))
+        rail_shape = _unpinch(rg) if not rg.is_empty else None
+    green_mm = to_mm(feats.green).intersection(model_box) if feats.green is not None else None
+    path_shape = None
+    if path_lines and green_mm is not None and not green_mm.is_empty:
+        pg = _line_buffer(path_lines).intersection(green_mm.buffer(0.3))
+        if road_shape is not None:
+            pg = pg.difference(road_shape.buffer(0.1))
+        path_shape = _unpinch(pg) if not pg.is_empty else None
+
+    # sea outline traced from the elevation (low pockets inland are not sea)
+    sea_poly = None
+    if sea.any():
+        F = np.where((elev <= 0.3) & ~sea, 1.0, elev)
+        sea_poly = _below(F, xs, ys, 0.3)
+        sea_poly = _unpinch(sea_poly) if sea_poly is not None else None
 
     # water geometry (areas + rivers drawn as lines)
     water_geom = None
@@ -262,33 +404,56 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             water_geom = _unpinch(water_geom) if not water_geom.is_empty else None
     water_mask = _inside(water_geom, X, Y) | sea
 
-    if p.roads in ("engraved", "raised") and road_mask.any():
-        rm = road_mask & ~water_mask
-        if p.roads == "engraved":
-            Z = np.where(rm, np.maximum(Z - p.road_depth_mm, base * 0.5 + 0.3), Z)
-        else:
-            Z = np.where(rm, Z + p.road_depth_mm, Z)
-
-    # contour lines
+    # contour lines: traced from the elevation as lines, engraved below as a cut that follows them exactly
     interval = p.contour_interval(relief_m)
-    contour_mask = np.zeros_like(sea)
+    contour_mask = np.zeros_like(sea)          # only for the preview picture
+    contour_shape = None
     if interval > 0:
         c = np.floor((elev - ref) / interval)
         edge = np.zeros_like(sea)
         edge[:, :-1] |= c[:, :-1] != c[:, 1:]
         edge[:-1, :] |= c[:-1, :] != c[1:, :]
-        contour_mask = _dilate(edge, max(0, int(round(0.45 / p.resolution_mm / 2.0)))) & ~water_mask & ~road_mask
-        Z = np.where(contour_mask, np.maximum(Z - p.contour_depth_mm, base * 0.5 + 0.3), Z)
+        contour_mask = edge & ~water_mask & ~road_mask
+        hi = float(np.nanmax(elev))
+        levels = [ref + n * interval for n in range(1, int((hi - ref) / interval) + 1)]
+        lines = _contour_lines(elev, xs, ys, levels)
+        if lines:
+            contour_shape = shapely.union_all(np.array([l.buffer(CONTOUR_MM / 2.0, quad_segs=2) for l in lines], dtype=object))
+            if road_shape is not None and p.roads == "raised":
+                contour_shape = contour_shape.difference(road_shape.buffer(0.1))
+            if rail_shape is not None:
+                contour_shape = contour_shape.difference(rail_shape.buffer(0.1))
+            contour_shape = _unpinch(contour_shape) if not contour_shape.is_empty else None
         clock.log(f"Contour lines every {interval:g} m")
 
-    # sea surface and floor in the grid
-    if sea.any():
-        Z = np.where(sea, base - p.water_depth_mm, Z)
-
     # 4. terrain solid --------------------------------------------------------------------------------------------------
+    # roads and contour lines are cut from the solid along their real outlines (never stepped along the grid): the cut is
+    # the outline's prism above a copy of the terrain lowered by the depth, so the floor follows the ground
     clock.step(0.35, "Terrain solid")
     terrain = S.heightfield(Z, xs, ys)
     top = float(Z.max())
+    over_top = top + max(p.road_depth_mm, p.rail_height_mm) + 5.0
+    raises = []
+    if road_shape is not None and p.roads == "raised":
+        raised = _shifted(terrain, p.road_depth_mm, W_mm, H_mm, -0.05)
+        raises.append(S.intersect(S.prism(road_shape, 0.3, over_top), raised))
+    if rail_shape is not None:                 # railway beds stand on the ground
+        bed = _shifted(terrain, p.rail_height_mm, W_mm, H_mm, -0.05)
+        raises.append(S.intersect(S.prism(rail_shape, 0.25, over_top), bed))
+    if raises:
+        terrain = S.union([terrain] + raises)
+    relief_cuts = []
+    if path_shape is not None and p.color == "mono":     # in one colour the park paths are shallow grooves
+        relief_cuts.append(S.subtract(S.prism(path_shape, -1.6, over_top),
+                                      [_shifted(terrain, -min(0.25, p.road_depth_mm), W_mm, H_mm, 0.05)]))
+    if road_shape is not None and p.roads == "engraved":
+        relief_cuts.append(S.subtract(S.prism(road_shape, -1.0, over_top), [_shifted(terrain, -p.road_depth_mm, W_mm, H_mm, 0.05)]))
+    if contour_shape is not None:
+        relief_cuts.append(S.subtract(S.prism(contour_shape, -1.3, over_top),
+                                      [_shifted(terrain, -p.contour_depth_mm, W_mm, H_mm, 0.05)]))
+    if relief_cuts:
+        terrain = S.subtract(terrain, relief_cuts)
+    top = max(top, terrain.bounding_box()[5])
 
     # 5. water cut at a flat level per piece ---------------------------------------------------------------------------
     # One prism of the whole water outline, intersected with "slabs" that start at each piece's floor: the walls of the
@@ -320,34 +485,73 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                         level = float(_sample(Z0, xs, ys, np.array([pt.x]), np.array([pt.y]))[0])
                     floor = max(level - p.water_depth_mm, 0.6)
                     slab = poly.buffer(0.5, join_style="mitre").intersection(cell)
-                    up_slabs.append(S.prism(slab, floor, top + 5.0))
+                    up_slabs.append(S.prism(slab, floor, over_top + 5.0))
                     level_slabs.append(S.prism(slab, floor, max(level, floor + 0.2)))
                     floors.append(floor)
                     water_levels.append(level)
         if up_slabs:
             gfloor = min(floors) - 0.5
-            outline_prism = S.prism(water_geom, gfloor, top + 5.0)
+            outline_prism = S.prism(water_geom, gfloor, over_top + 5.0)
             cut = S.intersect(outline_prism, S.union(up_slabs))
             water_solid = S.intersect(outline_prism, S.union(level_slabs))
-    if sea.any():
-        sea_poly = S.mask_to_polygons(sea, xs[0] - (xs[1] - xs[0]) / 2, ys[0] - (ys[1] - ys[0]) / 2, xs[1] - xs[0])
-        sea_poly = sea_poly.intersection(model_box)
-        if not sea_poly.is_empty:
-            water_solid = S.union([water_solid, S.prism(sea_poly, base - p.water_depth_mm, base)])
-            water_geom = sea_poly if water_geom is None else water_geom.union(sea_poly)
+    if sea_poly is not None:
+        # the sea: cut to a flat floor along the traced coastline (which reaches past the border, see _padded)
+        cut = S.union([cut, S.prism(sea_poly, base - p.water_depth_mm, over_top + 5.0)])
+        inside = sea_poly.intersection(model_box)
+        if not inside.is_empty:
+            water_solid = S.union([water_solid, S.prism(inside, base - p.water_depth_mm, base)])
+            water_geom = inside if water_geom is None else water_geom.union(inside)
+    if not water_solid.is_empty():
+        water_solid = S.intersect(water_solid, S.prism(model_box, -1.0, over_top + 10.0))
     terrain_wet = S.subtract(terrain, [cut]) if not cut.is_empty() else terrain
 
-    # 6. bridges over water ------------------------------------------------------------------------------------------------
-    bridges = []
+    # 6. bridges over water: a deck carried on piers and round arches (or a solid causeway when arches are off) ----------
+    spans: list[tuple[Any, Any, float, float, float]] = []      # (line, deck shape, width, deck height, water level)
     if p.bridges and water_geom is not None and bridge_lines:
-        for line, width in bridge_lines:
+        for line, width, kind in bridge_lines:
             if line is None or not line.intersects(water_geom):
                 continue
             ends = np.array([line.coords[0], line.coords[-1]])
             deck = float(_sample(Z, xs, ys, ends[:, 0], ends[:, 1]).max())
-            if p.roads == "raised":
+            if kind == "rail":
+                deck += p.rail_height_mm
+            elif p.roads == "raised":
                 deck += p.road_depth_mm
+            elif p.roads == "engraved":
+                deck -= p.road_depth_mm      # the deck carries on the groove of the road
+            over = line.intersection(water_geom)
+            probe = detail.along([g for g in getattr(over, "geoms", [over]) if g.geom_type == "LineString"], 0.5)
+            level = float(_sample(Z0, xs, ys, probe[:, 0], probe[:, 1]).min()) if len(probe) else base
             shape = line.buffer(width / 2.0 + 0.15, cap_style="flat").intersection(model_box)
+            if not shape.is_empty:
+                spans.append((line, shape, width + 0.3, deck, level))
+    # bridges that touch share one deck height (two decks a hair apart would leave a sliver step between them)
+    group = list(range(len(spans)))
+    def root(i: int) -> int:
+        while group[i] != i:
+            group[i] = group[group[i]]
+            i = group[i]
+        return i
+    for i in range(len(spans)):
+        for j in range(i + 1, len(spans)):
+            if spans[i][1].intersects(spans[j][1]):
+                group[root(i)] = root(j)
+    top_of: dict[int, float] = {}
+    for i, span in enumerate(spans):
+        top_of[root(i)] = max(top_of.get(root(i), span[3]), span[3])
+    bridges = []
+    arch_span = min(10.0, max(3.0, 28.0 * k))
+    arched = 0
+    for i, (line, shape, width, _deck, level) in enumerate(spans):
+        deck = top_of[root(i)]
+        if p.arches:
+            clipped = line.intersection(model_box.buffer(-0.01))
+            pieces = [g for g in getattr(clipped, "geoms", [clipped]) if g.geom_type == "LineString" and g.length > 0.2]
+            for piece in pieces:
+                solid = detail.arch_bridge(piece, width, deck, BRIDGE_DECK_MM, level, 0.3, arch_span)
+                bridges.append(S.intersect(solid, S.prism(model_box, -1.0, deck + 1.0)))
+            arched += 1 if deck - BRIDGE_DECK_MM - level >= 0.3 else 0
+        else:
             bridges.append(S.prism(shape, 0.0, deck))
     bridge_solid = S.union(bridges)
     if not bridge_solid.is_empty():
@@ -357,14 +561,33 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     building_solids = []
     building_shapes = []
     dropped = 0
+    sink = max(0.3, p.road_depth_mm + 0.1, p.contour_depth_mm + 0.1)   # below any groove next to the walls
+    roofs = 0
     if p.buildings and feats.buildings:
         clock.step(0.55, "Buildings")
+        cands = []
         for bld in feats.buildings:
             shape = to_mm(bld.shape)
             if shape is None:
                 continue
             shape = shape.intersection(model_box)
-            if shape.is_empty or shape.area < p.min_building_mm2:
+            if shape.is_empty or shape.area < MIN_BUILDING_ABS_MM2:
+                dropped += 1
+                continue
+            cands.append((bld, shape))
+        # a small building is kept when it belongs to a block of touching buildings big enough to print (a row of
+        # terraced houses), and dropped only when it stands alone
+        block_area = np.zeros(len(cands))
+        if cands:
+            blocks = [g for g in S.polygons(shapely.union_all(np.array([c[1].buffer(0.05) for c in cands], dtype=object)))]
+            tree = shapely.STRtree(blocks)
+            pts = [c[1].representative_point() for c in cands]
+            hit_in, hit_block = tree.query(pts, predicate="within")
+            block_area[hit_in] = np.array([blocks[j].area for j in hit_block])
+        tops_tree = shapely.STRtree([c[1] for c in cands]) if cands else None
+        for i, (bld, shape) in enumerate(cands):
+            tall = bld.height_m * k * p.building_exag >= 1.5 and shape.area >= 0.12      # a tower or a spire stays
+            if shape.area < p.min_building_mm2 and block_area[i] < 2.0 * p.min_building_mm2 and not tall:
                 dropped += 1
                 continue
             shape = shape.simplify(0.03).buffer(0.02, join_style="mitre")   # neighbours overlap instead of touching
@@ -374,65 +597,178 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 continue
             coords = np.array([c for poly in S.polygons(shape) for c in poly.exterior.coords])
             ground = _sample(Z, xs, ys, coords[:, 0], coords[:, 1])
-            z0 = max(float(ground.min()) - 0.3, 0.4)
-            h = max((bld.height_m - bld.min_height_m) * k * p.building_exag, p.min_building_height_mm)
-            z1 = float(ground.max()) + h
-            building_solids.append(S.prism(shape, z0, z1))
+            kv = k * p.building_exag
+            z0 = max(float(ground.min()) - sink, 0.4)
+            if bld.part and bld.min_height_m > 2.0 and _supported(i, cands, tops_tree, bld.min_height_m):
+                z0 = float(ground.max()) + bld.min_height_m * kv - 0.02      # a spire on its tower, a dome on its drum
+                z1 = float(ground.max()) + max(bld.height_m * kv, bld.min_height_m * kv + p.min_building_height_mm)
+            else:
+                z1 = float(ground.max()) + max((bld.height_m - (bld.min_height_m if bld.part else 0.0)) * kv,
+                                               p.min_building_height_mm)
+            roof = detail.default_roof(bld.kind, bld.roof, p.roofs)
+            roof_h = bld.roof_height_m * kv if bld.roof_height_m is not None else None
+            if roof in detail.POINTED and bld.part and bld.min_height_m > 2.0 and roof_h is None:
+                roof_h = z1 - z0                                # the whole part is the spire
+            solid = detail.building_solid(shape, z0, z1, roof, roof_h, bld.roof_across, kv) if p.roofs != "flat" else \
+                S.prism(shape, z0, z1)
+            roofs += 1 if roof not in ("", "flat") else 0
+            building_solids.append(solid)
             building_shapes.append(shape)
-        clock.log(f"{len(building_solids)} buildings on the model, {dropped} too small")
+        clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof), {dropped} too small")
     buildings = S.union(building_solids)
 
-    # 8. colour layers on the terrain ----------------------------------------------------------------------------------------
+    # 8. trees ---------------------------------------------------------------------------------------------------------------
+    trees_solid = S.EMPTY
+    n_trees = 0
+    P, R = np.zeros((0, 2)), np.zeros(0)
+    seen_from_air = False
+    if p.trees and (feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None):
+        clock.step(0.62, "Trees")
+        crown = p.tree_size_mm
+        mapped = []
+        for x, y, h_m, crown_m in feats.trees:
+            pt = to_mm(Point(x, y))
+            if pt is not None:
+                mapped.append((pt.x, pt.y, max(crown_m or h_m * 0.55 or 6.0, 3.0) * k))
+        seen_from_air = False
+        # single trees from the aerial photo only where a tree is still a tree on the model (finer than about 1:15.000);
+        # further out a crown would be smaller than the smallest printable one and woods are filled instead
+        if p.tree_source == "auto" and hasattr(sources, "aerial_trees") and crown / k <= 16.0:
+            try:
+                air = sources.aerial_trees(area.bbox, proj, progress=clock.log)
+            except GulliverError as exc:
+                air = None
+                notes.append(f"The aerial photo did not load ({exc.message}); trees from OpenStreetMap only.")
+            if air:
+                seen_from_air = True
+                attribution.append(aerial_mod.ATTRIBUTION)
+                known = np.array([(m[0], m[1]) for m in mapped]) if mapped else np.zeros((0, 2))
+                added = 0
+                for x, y, h_m, crown_m in air:
+                    pt = to_mm(Point(x, y))
+                    if pt is None:
+                        continue
+                    if len(known) and np.min(np.hypot(known[:, 0] - pt.x, known[:, 1] - pt.y)) < max(crown_m * k, crown) * 0.6:
+                        continue                                 # already mapped
+                    mapped.append((pt.x, pt.y, crown_m * k))
+                    added += 1
+                clock.log(f"{added} trees seen on the aerial photo")
+        house_shapes = shapely.union_all(np.array(building_shapes, dtype=object)) if building_shapes else None
+        light = [g for g in (house_shapes, water_geom, rail_shape) if g is not None]
+        blockers = light + [g for g in (road_shape, path_shape) if g is not None]
+        blocked = shapely.union_all(np.array([g.buffer(crown * 0.3) for g in blockers], dtype=object)) if blockers else None
+        blocked_light = shapely.union_all(np.array([g.buffer(crown * 0.2) for g in light], dtype=object)) if light else None
+        clip = lambda g: g.intersection(model_box) if g is not None and not g.is_empty else None  # noqa: E731
+        seed = int(abs(p.lon * 1e5) + abs(p.lat * 1e5)) % (2 ** 32)
+        P, R = detail.plant(woods=clip(to_mm(feats.woods)), parks=clip(to_mm(feats.parks)), mapped=mapped,
+                            rows=[to_mm(l) for l in feats.tree_rows], blocked=blocked, blocked_light=blocked_light,
+                            inside=footprint.buffer(-crown * 0.6), crown_mm=crown,
+                            density=p.tree_density, rng=np.random.default_rng(seed),
+                            scatter_parks=not seen_from_air, scatter_woods=not seen_from_air)
+        trees_solid = detail.trees_solid(P, R, lambda x, y: _sample(Z, xs, ys, x, y), sink=0.3 + p.road_depth_mm)
+        n_trees = len(P)
+        clock.log(f"{n_trees} trees")
+
+    # 9. colour layers on the terrain ----------------------------------------------------------------------------------------
     clock.step(0.68, "Parts")
-    solid_top = max([top] + [s.bounding_box()[5] for s in building_solids]) + 5.0
+    solid_top = max([top, trees_solid.bounding_box()[5] if not trees_solid.is_empty() else top]
+                    + [s.bounding_box()[5] for s in building_solids]) + 5.0
     terrain_body = S.union([terrain_wet, bridge_solid])
     parts: dict[str, Any] = {}
-    roads_skin = S.EMPTY
-    green_skin = S.EMPTY
+    layers_drawn: list[str] = []
+    zone_shapes = {}
     if p.color == "color":
         # the single-piece twin (for the STL): the same solid, never split, so it stays one closed body
-        parts[SINGLE] = S.union([terrain_body, buildings])
+        parts[SINGLE] = S.union([terrain_body, buildings, trees_solid])
+        ground_all = terrain_body
         # a colour layer is the top SKIN_MM of the terrain inside its outline: cutter = outline prism above the lowered
         # terrain; layer = terrain ∩ cutter and terrain -= cutter (complementary, never two coincident top faces)
         lowered = terrain_body.translate((0.0, 0.0, -SKIN_MM))
         wet = water_geom.buffer(0.05) if water_geom is not None else None   # layers stop just short of the banks
-        road_area = None
-        if roads_geom is not None and p.roads != "none":
-            road_area = roads_geom.intersection(model_box)
+        terrain_body = S.subtract(terrain_body, [buildings])               # once, before the layers are taken off it
+
+        def on_relief(shape: Any, kind: str) -> Any:
+            """A road or railway layer: just inside its groove/bed walls (a wall of the layer on a wall of the groove
+            would be two coincident faces), off the water but on its bridges."""
+            if shape is None:
+                return None
+            out = shape.buffer(-0.03, join_style="mitre").intersection(model_box)
             if wet is not None:
-                over = [line.buffer(width / 2.0, quad_segs=3) for line, width in bridge_lines] if p.bridges else []
+                over = [line.buffer(width / 2.0 - 0.03, quad_segs=3) for line, width, kd in bridge_lines if kd == kind] \
+                    if p.bridges else []
                 on_bridges = shapely.union_all(np.array(over, dtype=object)).intersection(water_geom.buffer(0.08)) if over else None
-                road_area = road_area.difference(wet)
+                out = out.difference(wet)
                 if on_bridges is not None and not on_bridges.is_empty:
-                    road_area = road_area.union(on_bridges)
-            road_area = _unpinch(road_area) if not road_area.is_empty else None
-        green_area = None
-        if p.green and feats.green is not None:
-            g = to_mm(feats.green).intersection(model_box)
-            if wet is not None:
+                    out = out.union(on_bridges)
+            return _unpinch(out) if not out.is_empty else None
+
+        areas: list[tuple[str, Any]] = [("roads", on_relief(road_shape, "road")), ("rails", on_relief(rail_shape, "rail"))]
+        if p.zones:
+            snow = []
+            line_m = detail.snow_line(land, p.snow_m)
+            if line_m is not None:
+                snow.append(_below(-elev, xs, ys, -line_m))
+            if feats.ice is not None:
+                snow.append(to_mm(feats.ice))
+            snow = [g for g in snow if g is not None and not g.is_empty]
+            if snow:
+                areas.append(("snow", shapely.union_all(np.array(snow, dtype=object))))
+            rock = []
+            if relief_m >= 60.0:
+                rock.append(_below(-_gaussian(detail.slope_deg(elev, cell_m), 1.0), xs, ys, -p.rock_slope_deg))
+            if feats.rock is not None:
+                rock.append(to_mm(feats.rock))
+            rock = [g for g in rock if g is not None and not g.is_empty]
+            if rock:
+                areas.append(("rock", shapely.union_all(np.array(rock, dtype=object))))
+        if p.green and (green_mm is not None or p.meadows):
+            g = model_box if p.meadows else green_mm      # meadows: every open bit of land is green
+            if path_shape is not None:
+                g = g.difference(path_shape)          # the paths show the ground through the green
+            areas.append(("green", g))
+        taken = None
+        cutters = []
+        zone_shapes: dict[str, Any] = {}
+        # the layers stay a hair off the walls of the buildings standing on them (a layer cut by a wall whose corner sits
+        # on the layer's edge would leave two bodies touching along that corner)
+        houses = shapely.union_all(np.array(building_shapes, dtype=object)).buffer(0.03, join_style="mitre") \
+            if building_shapes else None
+        for name, area_geom in areas:
+            if area_geom is None or area_geom.is_empty:
+                continue
+            g = area_geom.intersection(model_box)
+            if name not in ("roads", "rails") and wet is not None:
                 g = g.difference(wet)
-            if road_area is not None:
-                g = g.difference(road_area.buffer(0.05))
-            green_area = _unpinch(g) if not g.is_empty else None
-        road_cut = S.subtract(S.prism(road_area, -1.0, solid_top), [lowered]) if road_area is not None else S.EMPTY
-        green_cut = S.subtract(S.prism(green_area, -1.0, solid_top), [lowered]) if green_area is not None else S.EMPTY
-        roads_skin = S.intersect(terrain_body, road_cut)
-        green_skin = S.intersect(terrain_body, green_cut)
-        terrain_body = S.subtract(terrain_body, [road_cut, green_cut, buildings])
+            if houses is not None:
+                g = g.difference(houses)
+            if taken is not None:
+                g = g.difference(taken.buffer(0.08))
+            if name in ("snow", "rock"):              # no speckles: drop crumbs, smooth the edge
+                g = shapely.union_all(np.array([q for q in S.polygons(g) if q.area >= 0.8] or [Polygon()], dtype=object))
+            g = _unpinch(g) if not g.is_empty else None
+            if g is None or g.is_empty:
+                continue
+            taken = g if taken is None else taken.union(g)
+            cutter = S.subtract(S.prism(g, -1.0, solid_top), [lowered])
+            parts[name] = S.intersect(terrain_body, cutter)
+            zone_shapes[name] = g
+            cutters.append(cutter)
+            layers_drawn.append(name)
+        terrain_body = S.subtract(terrain_body, cutters)
         parts["terrain"] = terrain_body
         parts["buildings"] = buildings
         parts["water"] = water_solid
-        parts["roads"] = roads_skin
-        parts["green"] = green_skin
+        if not trees_solid.is_empty():
+            parts["trees"] = S.subtract(trees_solid, [ground_all, buildings])
     else:
-        parts["terrain"] = S.union([terrain_body, buildings])
+        parts["terrain"] = S.union([terrain_body, buildings, trees_solid])
 
-    # 9. outline shape ----------------------------------------------------------------------------------------------------
+    # 10. outline shape ----------------------------------------------------------------------------------------------------
     if p.shape != "rect":
         cutter = S.prism(footprint, -1.0, solid_top + 10.0)
         parts = {n: S.intersect(m, cutter) for n, m in parts.items()}
 
-    # 10. frame --------------------------------------------------------------------------------------------------------------
+    # 11. frame --------------------------------------------------------------------------------------------------------------
     outer = footprint
     if p.frame_mm > 0:
         outer = footprint.buffer(p.frame_mm, join_style="mitre" if p.shape in ("rect", "hexagon") else "round")
@@ -449,7 +785,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         else:
             parts["terrain"] = S.union([parts["terrain"], joined])
 
-    # 11. text on the bottom -------------------------------------------------------------------------------------------------
+    # 12. text on the bottom -------------------------------------------------------------------------------------------------
     bounds = outer.bounds
     tiles_n = p.tiles_x * p.tiles_y
     label_lines: list[str] = []
@@ -472,7 +808,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         if SINGLE in parts:
             parts[SINGLE] = S.subtract(parts[SINGLE], [eng])
 
-    # 12. tiles and pins -------------------------------------------------------------------------------------------------------
+    # 13. tiles and pins -------------------------------------------------------------------------------------------------------
     tiles: list[dict[str, Any]] = []
     pins: list[dict[str, Any]] = []
     if tiles_n > 1:
@@ -534,12 +870,20 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "parts": {n: {"volume_cm3": round(m.volume() / 1000.0, 2), "triangles": m.num_tri(), "genus": m.genus()} for n, m in parts.items()},
         "buildings": len(building_solids),
         "buildings_dropped": dropped,
+        "building_source": building_source,
         "roads_drawn": len(road_lines),
         "road_rank": rank,
         "water_pieces": len(water_levels),
         "sea": bool(sea.any()),
         "contour_interval_m": interval,
-        "bridges": len(bridges),
+        "bridges": len(spans),
+        "arched_bridges": arched,
+        "rails_drawn": len(rail_lines),
+        "paths_drawn": len(path_lines),
+        "trees": n_trees,
+        "trees_from_air": seen_from_air if p.trees else False,
+        "roofs": roofs,
+        "colour_layers": layers_drawn,
         "tiles": [{"id": t["id"], "size_mm": [round(t["box"][2] - t["box"][0], 1), round(t["box"][3] - t["box"][1], 1)]} for t in tiles],
         "pins": len(pins),
         "features": feats.summary(),
@@ -548,5 +892,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     clock.step(0.92, "Done")
     masks = {"water": water_mask, "roads": road_mask & ~water_mask, "contours": contour_mask}
     footprints = {"outline": outer, "model": footprint, "buildings": building_shapes, "water": water_geom, "roads": roads_geom,
-                  "green": to_mm(feats.green).intersection(model_box) if feats.green is not None else None}
+                  "green": green_mm, "rails": rail_shape, "paths": path_shape, "trees": (P, R) if n_trees else None,
+                  "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock")}
     return BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)
