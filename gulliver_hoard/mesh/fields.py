@@ -94,11 +94,13 @@ def kind_at(poly: Polygon, kinds: list[tuple[Any, str]]) -> str:
 
 
 def all_rows(parts: list[Polygon], kinds: list[tuple[Any, str]], spacing_mm: float, width_mm: float,
-             max_parcels: int = 6000) -> Any:
-    """Rows over every parcel (orchards and vineyards at 0.7 of the spacing; meadows get none)."""
+             max_parcels: int = 6000, angles: Optional[list[Optional[float]]] = None) -> Any:
+    """Rows over every parcel (orchards and vineyards at 0.7 of the spacing; meadows get none), along the direction seen
+    on the photo where ``angles`` has one for that parcel, else along its long side."""
     tree = shapely.STRtree([g for g, _k in kinds]) if kinds else None
     out = []
-    for poly in sorted(parts, key=lambda q: -q.area)[:max_parcels]:
+    seen = list(angles) if angles is not None else [None] * len(parts)
+    for poly, angle in sorted(zip(parts, seen), key=lambda q: -q[0].area)[:max_parcels]:
         kind = "farmland"
         if tree is not None:
             idx = tree.query(poly, predicate="intersects")
@@ -106,10 +108,10 @@ def all_rows(parts: list[Polygon], kinds: list[tuple[Any, str]], spacing_mm: flo
                 kind = kind_at(poly, [kinds[i] for i in idx])
         if kind == "meadow":
             continue
-        if poly.area < 0.55 * poly.minimum_rotated_rectangle.area:
+        if angle is None and poly.area < 0.55 * poly.minimum_rotated_rectangle.area:
             continue                                   # an L or a ring left around other fields: no sensible row direction
         sp = spacing_mm * (0.7 if kind in ROW_KINDS_CLOSE else 1.0)
-        r = rows(poly, max(sp, width_mm * 1.8), width_mm)
+        r = rows(poly, max(sp, width_mm * 1.8), width_mm, angle_deg=angle)
         if r is not None:
             out.append(r)
     return _union(out)

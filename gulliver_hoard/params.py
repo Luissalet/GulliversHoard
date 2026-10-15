@@ -84,6 +84,8 @@ class ModelParams(BaseModel):
     field_rows: bool = Field(True, description="Crop rows engraved inside each field along its long side (vineyards and "
                                                "orchards closer together).")
     row_spacing_mm: float = Field(1.4, ge=0.8, le=5, description="Distance between engraved crop rows.")
+    rows_from_photo: bool = Field(True, description="In Spain, crop rows follow the direction each field shows on the aerial photo "
+                                                    "(else they run along the field's long side).")
     plazas: bool = Field(True, description="Squares and pedestrian areas in their own lighter colour (colour mode).")
     dsm_heights: bool = Field(True, description="Real heights of every building, with towers and spires as their own volumes, from "
                                                 "the laser surface model where one is open (Netherlands, France, England, NRW, "

@@ -323,6 +323,7 @@ export default function Nueva({ query }) {
           <Toggle label={t("l_landcover")} checked={form.landcover} onChange={(v) => set({ landcover: v })} hint={t("l_landcover_help")} />
           <Toggle label={t("l_fields")} checked={form.fields} onChange={(v) => set({ fields: v })} hint={t("l_fields_help")} />
           {form.fields && <Toggle label={t("l_field_rows")} checked={form.field_rows} onChange={(v) => set({ field_rows: v })} hint={t("l_field_rows_help")} />}
+          {form.fields && form.field_rows && <Toggle label={t("l_rows_photo")} checked={form.rows_from_photo ?? true} onChange={(v) => set({ rows_from_photo: v })} hint={t("l_rows_photo_help")} />}
           {form.fields && form.field_rows && (
             <div className="grid grid-cols-2 gap-3">
               <NumberField id="f-rowsp" label={t("row_spacing")} unit="mm" step={0.1} min={0.8} max={5} value={form.row_spacing_mm} onChange={(v) => set({ row_spacing_mm: v })} />

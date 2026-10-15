@@ -255,6 +255,7 @@ function Carries({ report }) {
   if (report.dsm_buildings > 0) lines.push(t("st_dsm", { n: num(report.dsm_buildings, 0, lang) }));
   if (report.fields > 0) lines.push(t("st_fields", { n: num(report.fields, 0, lang) }));
   if (report.field_rows) lines.push(t("st_field_rows"));
+  if (report.rows_from_photo > 0) lines.push(t("st_rows_photo", { n: num(report.rows_from_photo, 0, lang) }));
   if (report.plazas) lines.push(t("st_plazas"));
   if (report.highlight) lines.push(t.has(`st_highlight_${report.highlight}`) ? t(`st_highlight_${report.highlight}`) : t("st_highlight_marker"));
   if (report.track) lines.push(t("st_track"));

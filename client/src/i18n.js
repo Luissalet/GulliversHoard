@@ -316,6 +316,8 @@ const D = {
   l_fields_help: ["Cada parcela en su color, con los lindes como surcos finos.", "Each parcel in its own colour, edges as fine grooves."],
   l_field_rows: ["Surcos dentro de cada campo", "Rows inside each field"],
   l_field_rows_help: ["Surcos grabados a lo largo de cada campo; en viñedos y frutales, más juntos.", "Rows engraved along each field; closer together in vineyards and orchards."],
+  l_rows_photo: ["Surcos según la foto aérea", "Rows as seen from the air"],
+  l_rows_photo_help: ["En España, cada campo lleva los surcos en la dirección que se ve en la ortofoto; si no se ve clara, a lo largo del campo.", "In Spain, each field gets its rows in the direction the aerial photo shows; where it is not clear, along the field."],
   row_spacing: ["Separación de surcos", "Row spacing"],
 
   // personal touches
@@ -394,6 +396,7 @@ const D = {
   st_dsm: ["{n} edificios con altura real por láser", "{n} buildings at laser-measured height"],
   st_fields: ["{n} campos", "{n} fields"],
   st_field_rows: ["Con surcos en los campos", "With rows in the fields"],
+  st_rows_photo: ["Surcos de {n} campos en la dirección de la foto aérea", "Rows of {n} fields in the direction of the aerial photo"],
   st_plazas: ["Plazas y zonas peatonales en su color", "Squares and pedestrian areas in their own colour"],
   st_highlight_building: ["Tu sitio: el edificio en dorado", "Your place: the building in gold"],
   st_highlight_marker: ["Tu sitio: marca dorada", "Your place: gold marker"],

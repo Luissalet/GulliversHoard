@@ -142,3 +142,20 @@ def test_radar_pits_are_filled_but_valleys_kept():
     big = z.copy(); big[70:110, 10:90] -= 6   # a wide closed basin (a real one): left alone
     out, n = _fill_pits(big, 3.0, max_area_m2=20000.0)
     assert n == 1 and out[61, 41] > 20 and out[22, 50] == big[22, 50] and out[90, 50] == big[90, 50]
+
+
+def test_rows_follow_the_direction_on_the_photo():
+    from gulliver_hoard.sources import aerial as aerial_mod
+
+    class Photo(FakeSources):
+        def aerial_photo(self, bbox, m_per_px, progress=None):
+            size = 600
+            yy, xx = np.mgrid[0:size, 0:size].astype(float)
+            a = np.radians(60.0)
+            v = 128 + 60 * np.sign(np.sin(2 * np.pi * (-xx * np.sin(a) - yy * np.cos(a)) / 10.0))
+            return np.repeat(v[:, :, None], 3, axis=2).astype(np.uint8), bbox
+
+    res = build(make(), Photo())
+    assert res.stats["rows_from_photo"] >= 1 and aerial_mod.ROWS_ATTRIBUTION in res.attribution
+    plain = build(make(rows_from_photo=False), Photo())
+    assert plain.stats["rows_from_photo"] == 0 and aerial_mod.ROWS_ATTRIBUTION not in plain.attribution

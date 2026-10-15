@@ -957,6 +957,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     fields_shape = None
     rows_shape = None
     field_gaps = None
+    rows_seen = 0
     if p.fields and (feats.farmland or feats.crops is not None):
         mask = _union_mm([to_mm(g) for g, _k in feats.farmland] + [to_mm(feats.crops)])
         if mask is not None:
@@ -975,7 +976,29 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 field_gaps = mask.difference(fields_shape.buffer(0.01))
                 if p.field_rows:
                     kinds = [(to_mm(g), kd) for g, kd in feats.farmland]
-                    rows_shape = fields_mod.all_rows(field_parcels, kinds, p.row_spacing_mm, max(0.4, p.nozzle_mm))
+                    row_angles = None
+                    # in Spain the photo shows which way each field was really ploughed or planted
+                    if p.rows_from_photo and hasattr(sources, "aerial_photo"):
+                        px_m = max(1.0, math.sqrt(area.width_m * area.height_m / 16e6))
+                        try:
+                            got = sources.aerial_photo(area.bbox, px_m, progress=clock.log)
+                        except GulliverError as exc:
+                            got = None
+                            notes.append(f"The aerial photo did not load ({exc.message}); rows along each field's long side.")
+                        if got:
+                            rgb, pbox = got
+                            to_ll = lambda x, y: proj.inv(np.asarray(x) / k - area.width_m / 2.0,      # noqa: E731
+                                                          np.asarray(y) / k - area.height_m / 2.0)
+                            def from_ll(lon: Any, lat: Any) -> tuple[Any, Any]:
+                                mx, my = proj.fwd(lon, lat)
+                                return (np.asarray(mx) + area.width_m / 2.0) * k, (np.asarray(my) + area.height_m / 2.0) * k
+                            row_angles = aerial_mod.row_angles(rgb, pbox, to_ll, from_ll, field_parcels, erode=3.0 * px_m * k)
+                            rows_seen = sum(1 for a in row_angles if a is not None)
+                            if rows_seen:
+                                attribution.append(aerial_mod.ROWS_ATTRIBUTION)
+                                clock.log(f"Row direction read from the aerial photo in {rows_seen} fields")
+                    rows_shape = fields_mod.all_rows(field_parcels, kinds, p.row_spacing_mm, max(0.4, p.nozzle_mm),
+                                                     angles=row_angles)
                     rows_shape = _unpinch(rows_shape) if rows_shape is not None and not rows_shape.is_empty else None
                 # tracks across the fields are paths too (grooves in one colour, ground between the fields in colour)
                 if path_lines:
@@ -1743,6 +1766,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "landcover": landcover_used,
         "dsm_buildings": dsm_used,
         "fields": len(field_parcels),
+        "rows_from_photo": rows_seen,
         "field_rows": rows_shape is not None,
         "plazas": "plazas" in layers_drawn,
         "highlight": highlight_kind,

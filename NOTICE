@@ -5,7 +5,7 @@ Gulliver's Hoard builds models from open data. Credit these sources when you sha
 - Elevation in Spain: Modelo Digital del Terreno © Instituto Geográfico Nacional de España, CC BY 4.0 — https://www.ign.es
 - Buildings in Spain (footprints and floors): © Dirección General del Catastro, INSPIRE Buildings download service —
   https://www.catastro.hacienda.gob.es (free reuse with attribution)
-- Trees in Spain, and rock, meadows and woods in Spanish mountains: read from the PNOA orthophoto © Instituto Geográfico Nacional de España, CC BY 4.0 — https://pnoa.ign.es
+- Trees in Spain, rock, meadows and woods in Spanish mountains and the direction of crop rows in Spanish fields: read from the PNOA orthophoto © Instituto Geográfico Nacional de España, CC BY 4.0 — https://pnoa.ign.es
 - Farm parcels in Spain: © Dirección General del Catastro, INSPIRE Cadastral Parcels download service (free reuse with attribution)
 - Building footprints worldwide: Microsoft Global ML Building Footprints, ODbL — https://github.com/microsoft/GlobalMLBuildingFootprints
 - Roofs and heights in Africa, South and South-East Asia and Latin America: Google Open Buildings 2.5D Temporal, CC BY 4.0 or

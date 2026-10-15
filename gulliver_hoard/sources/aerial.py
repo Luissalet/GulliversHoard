@@ -18,6 +18,7 @@ from .http import Fetcher
 PNOA_WMS = "https://www.ign.es/wms-inspire/pnoa-ma"
 ATTRIBUTION = "Árboles detectados en la ortofoto PNOA © Instituto Geográfico Nacional (CC BY 4.0)"
 COVER_ATTRIBUTION = "Roca, prados y bosques leídos de la ortofoto PNOA © Instituto Geográfico Nacional (CC BY 4.0)"
+ROWS_ATTRIBUTION = "Dirección de los surcos leída de la ortofoto PNOA © Instituto Geográfico Nacional (CC BY 4.0)"
 BOXES = [(-9.6, 35.8, 4.6, 44.0), (-18.4, 27.5, -13.2, 29.6)]
 TILE_PX = 2000
 M_PER_PX = 0.5
@@ -139,3 +140,57 @@ def trees(rgb: np.ndarray, bbox: tuple[float, float, float, float], projector: A
     X, Y = projector.fwd(lon, lat)
     crown = np.clip(radius[keep] * 2.2, min_crown_m, max_crown_m)
     return [(float(x), float(y), float(c * 1.2), float(c)) for x, y, c in zip(X, Y, crown)]
+
+
+def row_angles(rgb: np.ndarray, bbox: tuple[float, float, float, float], to_lonlat: Callable[[Any, Any], tuple[Any, Any]],
+               from_lonlat: Callable[[Any, Any], tuple[Any, Any]], polys: list[Any], *, erode: float = 0.0,
+               min_px: int = 200, min_coherence: float = 0.2) -> list[Optional[float]]:
+    """Direction of the stripes seen inside each polygon (ploughing, tramlines, rows of vines), in degrees from east in the
+    polygon's own frame, or None where the photo shows no clear direction. ``to_lonlat`` / ``from_lonlat`` convert between
+    the polygons' frame and degrees. The structure tensor of the brightness, summed over the inside of the polygon (shrunk
+    by ``erode`` so its edges with the neighbours do not count), gives the main direction of change; the rows run across
+    it."""
+    import shapely
+    from scipy.ndimage import gaussian_filter
+
+    b0, b1, b2, b3 = bbox
+    h, w = rgb.shape[:2]
+    gray = gaussian_filter(rgb.astype(np.float32).mean(axis=2), 1.0)
+    gy_img, gx = np.gradient(gray)
+    gy = -gy_img                                      # rows run north to south: the frame's y points the other way
+    jxx, jyy, jxy = gx * gx, gy * gy, gx * gy
+    out: list[Optional[float]] = []
+    for poly in polys:
+        inner = poly.buffer(-erode) if erode > 0 else poly
+        if inner.is_empty:
+            out.append(None)
+            continue
+        x0, y0, x1, y1 = inner.bounds
+        lons, lats = to_lonlat(np.array([x0, x1, x0, x1]), np.array([y0, y0, y1, y1]))
+        c0 = max(0, int((np.min(lons) - b0) / (b2 - b0) * w))
+        c1 = min(w, int((np.max(lons) - b0) / (b2 - b0) * w) + 2)
+        r0 = max(0, int((b3 - np.max(lats)) / (b3 - b1) * h))
+        r1 = min(h, int((b3 - np.min(lats)) / (b3 - b1) * h) + 2)
+        if c1 - c0 < 3 or r1 - r0 < 3:
+            out.append(None)
+            continue
+        cc, rr = np.meshgrid(np.arange(c0, c1) + 0.5, np.arange(r0, r1) + 0.5)
+        px, py = from_lonlat(b0 + cc / w * (b2 - b0), b3 - rr / h * (b3 - b1))
+        inside = shapely.contains_xy(inner, np.asarray(px), np.asarray(py))
+        if int(inside.sum()) < min_px:
+            out.append(None)
+            continue
+        sxx = float(jxx[r0:r1, c0:c1][inside].sum())
+        syy = float(jyy[r0:r1, c0:c1][inside].sum())
+        sxy = float(jxy[r0:r1, c0:c1][inside].sum())
+        total = sxx + syy
+        if total <= 1e-6:
+            out.append(None)
+            continue
+        coherence = math.sqrt((sxx - syy) ** 2 + 4.0 * sxy ** 2) / total
+        if coherence < min_coherence:
+            out.append(None)
+            continue
+        across = 0.5 * math.degrees(math.atan2(2.0 * sxy, sxx - syy))
+        out.append((across + 90.0) % 180.0)
+    return out

@@ -59,6 +59,12 @@ class Sources:
             return None
         rgb, box = _aerial.fetch(self.fetcher, bbox, m_per_px=m_per_px, progress=progress)
         return _aerial.cover(rgb), box
+
+    def aerial_photo(self, bbox, m_per_px: float, *, progress: Optional[Callable[[str], None]] = None) -> Optional[tuple]:
+        """The aerial photo (Spain) at about ``m_per_px``: (RGB array, photo bbox), or None where there is none."""
+        if not _aerial.covers(bbox):
+            return None
+        return _aerial.fetch(self.fetcher, bbox, m_per_px=m_per_px, progress=progress)
     def canopy(self, bbox, *, progress: Optional[Callable[[str], None]] = None):
         """Canopy heights (metres) over the area from the global map, and the mercator bounds of the array."""
         return _canopy.fetch(self.fetcher, bbox, progress=progress)
