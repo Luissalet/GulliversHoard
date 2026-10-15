@@ -81,6 +81,8 @@ class IssuesArgs(BaseModel):
     model_id: str = ModelId
     build_id: str = Field("", max_length=32)
     layer: str = Field("", max_length=40)
+    offset: int = Field(0, ge=0)
+    limit: int = Field(50, ge=1, description="Locations per page. Follow next_offset to read all positions.")
 
 
 class CreateArgs(BaseModel):
@@ -237,8 +239,9 @@ TOOLS: list[Tool] = [
                                synonyms="filamento, presupuesto, peso, color"), MaterialArgs, R,
          lambda s, a: s.materials(a.model_id, build_id=a.build_id, profile_id=a.profile_id)),
     Tool("model_issues", _d("Positions of thin buildings, layers and crowns, in preview millimetres. Zonas fragiles.",
+                            "Paged to keep every position readable through MCP. Follow next_offset until null; total is after the layer filter.",
                             synonyms="localizar, detalles finos, imprimir"), IssuesArgs, R,
-         lambda s, a: s.issues(a.model_id, build_id=a.build_id, layer=a.layer)),
+         lambda s, a: s.issues(a.model_id, build_id=a.build_id, layer=a.layer, offset=a.offset, limit=a.limit)),
     Tool("place_search", _d("Find a place by name: centre and bounding box. Buscar lugar.", synonyms="geocodificar, dónde está, dirección"),
          SearchArgs, ann(read_only=True, open_world=True), lambda s, a: s.search(a.query, a.limit)),
     Tool("area_check", _d("What a model of an area would be: scale, size in mm, tiles for the bed, warnings. Comprobar zona.",

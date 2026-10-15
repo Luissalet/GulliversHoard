@@ -338,14 +338,18 @@ class Services:
             return report["material_estimate"]
         return printing.estimate(report, profile)
 
-    def issues(self, pid: str, *, build_id: str = "", layer: str = "") -> dict[str, Any]:
+    def issues(self, pid: str, *, build_id: str = "", layer: str = "", offset: int = 0, limit: int = 50) -> dict[str, Any]:
         report = self.projects.report(pid, build_id)
         if not report:
             raise GulliverError("not_found", "This model has not been built yet.")
         data = (report.get("printability") or {}).get("locations")
         if data is None:
             raise GulliverError("unavailable", "Rebuild this older model to locate its thin features.")
-        return {"model_id": pid, "build_id": build_id, "locations": [p for p in data if not layer or p["layer"] == layer]}
+        points = [p for p in data if not layer or p["layer"] == layer]
+        page = points[offset:offset + limit]
+        end = offset + len(page)
+        return {"model_id": pid, "build_id": build_id, "locations": page, "total": len(points),
+                "offset": offset, "next_offset": end if end < len(points) else None}
 
     def builds(self, pid: str) -> dict[str, Any]:
         rec = self.projects.get(pid)

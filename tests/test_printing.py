@@ -65,3 +65,13 @@ def test_finished_build_exposes_materials_and_locations_through_normal_tools(cal
     assert isinstance(markers["locations"], list)
     issues = call("model_issues", {"model_id":m["id"],"layer":"buildings"})["locations"]
     assert all(item["layer"] == "buildings" for item in issues)
+    found = []
+    offset = 0
+    while True:
+        page = call("model_issues", {"model_id":m["id"],"offset":offset,"limit":3})
+        assert len(page["locations"]) <= 3 and page["offset"] == offset
+        found.extend(page["locations"])
+        if page["next_offset"] is None:
+            break
+        offset = page["next_offset"]
+    assert found == report["printability"]["locations"] and len(found) == page["total"]
