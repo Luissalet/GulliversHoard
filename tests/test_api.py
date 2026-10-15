@@ -82,6 +82,23 @@ def test_update_rebuild_duplicate_and_jobs(call):
     assert nb["code"] == "not_found"
 
 
+def test_changing_a_model_while_it_builds_queues_a_rebuild(services):
+    from gulliver_hoard.jobs import Job
+    m = services.create("Lilliput", {**SMALL}, preset="city", place="Lilliput (demo)", build_now=False)
+    running = Job("build", m["id"], "Lilliput", lambda j: None)
+    running.state, running.inputs = "running", services.projects.get(m["id"])["params"]
+    services.jobs._jobs[running.id] = running
+    services.jobs._order.append(running.id)
+    assert services.start_build(m["id"])["id"] == running.id
+    u = services.update(m["id"], values={"palette": "white"}, build_now=True)
+    assert u["params"]["palette"] == "white"
+    rebuilt = [j for j in services.jobs.list(m["id"]) if j["id"] != running.id]
+    assert len(rebuilt) == 1 and rebuilt[0]["state"] == "done"
+    from gulliver_hoard.mesh.build import palette_colors
+    assert services.projects.report(m["id"])["parts"]["terrain"]["color"] == palette_colors("white")["terrain"]
+    running.state = "done"
+
+
 def test_cancel_a_queued_job(services):
     from gulliver_hoard.jobs import Jobs
     jobs = Jobs(services.config.data_dir / "j.json", background=True)

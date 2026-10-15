@@ -211,8 +211,9 @@ class Services:
     def start_build(self, pid: str) -> dict[str, Any]:
         rec = self.projects.get(pid)
         active = self.jobs.active_for(pid)
-        if active:
+        if active and (active.state == "queued" or active.inputs in (None, rec["params"])):
             return active.to_dict(log=False)
+        # A build already running with older settings: queue another one after it so the change is built too.
         params = ModelParams(**rec["params"])
         if params.estimated_cells() > MAX_CELLS:
             need = params.resolution_mm * math.sqrt(params.estimated_cells() / MAX_CELLS) * 1.02
@@ -223,6 +224,7 @@ class Services:
         def work(job: Job) -> dict[str, Any]:
             self.projects.update(pid, status="building", job=job.id)
             current = self.projects.get(pid)
+            job.inputs = current["params"]
             p = ModelParams(**current["params"])
             settings = self.settings.get()
             build_id = new_id()

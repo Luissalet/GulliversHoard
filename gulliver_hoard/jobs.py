@@ -38,6 +38,7 @@ class Job:
         self.hint = ""
         self.result: Any = None
         self.cancel_requested = False
+        self.inputs: Any = None
 
     def report(self, fraction: float, message: str) -> None:
         if fraction >= 0:
