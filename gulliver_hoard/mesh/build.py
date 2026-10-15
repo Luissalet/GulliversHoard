@@ -1292,7 +1292,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 continue
             shape = shape.simplify(0.03).buffer(0.02, join_style="mitre")   # neighbours overlap instead of touching
             if p.thicken:
-                shape = printability.thicken(shape, 2.0 * p.nozzle_mm)       # thin wings, sheds and spires get two passes
+                shape = printability.thicken(shape, 2.0 * p.nozzle_mm).intersection(model_box)   # thin wings, sheds, spires
             if shape.is_empty:
                 continue
             if water_geom is not None and water_geom.contains(shape.representative_point()):

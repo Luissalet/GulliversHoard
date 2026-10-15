@@ -60,6 +60,9 @@ def test_street_seams_and_thickening():
     assert len(res.tiles) == 4 and not all_closed(res)
     assert res.stats["printability"]["score"] >= 0
     assert res.stats["printability"]["buildings"]["thin_walls"] == 0      # thin buildings are widened to two passes
+    W, H = res.params.model_size_mm
+    bb = res.parts["buildings"].bounding_box()
+    assert bb[0] >= -0.01 and bb[1] >= -0.01 and bb[3] <= W + 0.01 and bb[4] <= H + 0.01   # and stay inside the model
 
 
 def test_surface_model_heights(monkeypatch):

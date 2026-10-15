@@ -74,7 +74,7 @@ def test_advice_comes_with_parameter_fixes():
                                tree_size_mm=0.5, resolution_mm=0.35, thicken=False))
     fixes = {f["param"]: f for f in P.analyse(fake)["fixes"]}
     assert "base_mm" not in fixes                                      # 1 mm is already over four layers
-    assert "min_building_mm2" not in fixes                             # a thin building is widened, not dropped
+    assert "min_building_mm2" not in fixes                             # thin or tiny buildings are widened, not dropped
     assert fixes["tree_size_mm"]["to"] >= 1.0
     assert fixes["thicken"] == {"param": "thicken", "from": False, "to": True}     # the thin streets
     for f in fixes.values():

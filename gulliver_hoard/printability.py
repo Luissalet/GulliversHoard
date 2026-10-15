@@ -204,9 +204,9 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         if not n:
             continue
         if name == "buildings":
-            advice.append(f"Hay {_n(n, 'edificio suelto demasiado pequeño', 'edificios sueltos demasiado pequeños')} para imprimirse: sube min_building_mm2 o el tamaño del modelo (size_mm).")
-            # a modest step: the loose crumbs are the smallest footprints, and a big jump would drop whole streets of houses
-            fix("min_building_mm2", max(0.8, float(getattr(params, "min_building_mm2", 0) or 0) * 1.5))
+            advice.append(f"Hay {_n(n, 'edificio suelto demasiado pequeño', 'edificios sueltos demasiado pequeños')} para imprimirse: activa thicken (los agranda a dos pasadas), sube min_building_mm2 o el tamaño del modelo (size_mm).")
+            # widened rather than dropped: raising min_building_mm2 to lose a few crumbs takes whole streets of houses with them
+            fix("thicken", True)
         elif name == "trees":
             advice.append(f"Hay {_n(n, 'árbol minúsculo que no se agarraría', 'árboles minúsculos que no se agarrarían')} a la cama: sube tree_size_mm o baja tree_density.")
             fix("tree_size_mm", min(6.0, two * 1.5))
