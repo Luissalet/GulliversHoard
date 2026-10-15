@@ -1531,33 +1531,33 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         # on the layer's edge would leave two bodies touching along that corner)
         houses = shapely.union_all(np.array(building_shapes, dtype=object)).buffer(0.03, join_style="mitre") \
             if building_shapes else None
-        for name, area_geom in areas:
+        for layer, area_geom in areas:
             if area_geom is None or area_geom.is_empty:
                 continue
             g = area_geom.intersection(model_box)
-            if name not in ("roads", "rails") and wet is not None:
+            if layer not in ("roads", "rails") and wet is not None:
                 g = g.difference(wet)
             if houses is not None:
                 g = g.difference(houses)
-            if path_shape is not None and name in ("snow", "rock", "green"):
+            if path_shape is not None and layer in ("snow", "rock", "green"):
                 g = g.difference(path_shape)          # the paths show the ground through the green, the rock and the snow
             if taken is not None:
                 g = g.difference(taken.buffer(0.08))
-            if name in ("snow", "rock"):              # no speckles: drop crumbs, smooth the edge
+            if layer in ("snow", "rock"):              # no speckles: drop crumbs, smooth the edge
                 g = shapely.union_all(np.array([q for q in S.polygons(g) if q.area >= 0.8] or [Polygon()], dtype=object))
             g = _unpinch(g) if not g.is_empty else None
             if g is None or g.is_empty:
                 continue
             taken = g if taken is None else taken.union(g)
             cutter = S.subtract(S.prism(g, -1.0, solid_top), [lowered])
-            parts[name] = S.intersect(terrain_body, cutter)
-            parts[name].num_tri()                     # evaluated now: manifold's lazy tree would keep every cutter alive
+            parts[layer] = S.intersect(terrain_body, cutter)
+            parts[layer].num_tri()                     # evaluated now: manifold's lazy tree would keep every cutter alive
             # the layer leaves the terrain at once, so the next one works on a lighter body and nothing big is kept
             terrain_body = S.subtract(terrain_body, [cutter])
             terrain_body.num_tri()
             del cutter
-            zone_shapes[name] = g
-            layers_drawn.append(name)
+            zone_shapes[layer] = g
+            layers_drawn.append(layer)
         parts["terrain"] = terrain_body
         parts["buildings"] = S.subtract(buildings, [towers]) if not towers.is_empty() else buildings
         if not towers.is_empty():

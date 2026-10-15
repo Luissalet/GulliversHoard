@@ -159,3 +159,12 @@ def test_rows_follow_the_direction_on_the_photo():
     assert res.stats["rows_from_photo"] >= 1 and aerial_mod.ROWS_ATTRIBUTION in res.attribution
     plain = build(make(rows_from_photo=False), Photo())
     assert plain.stats["rows_from_photo"] == 0 and aerial_mod.ROWS_ATTRIBUTION not in plain.attribution
+
+
+def test_plaque_and_label_carry_the_model_name_in_colour(monkeypatch):
+    from gulliver_hoard.mesh import build as build_mod
+    seen = []
+    real = build_mod.plaque_mod.plaque_layout
+    monkeypatch.setattr(build_mod.plaque_mod, "plaque_layout", lambda *a, **kw: seen.append(kw["title"]) or real(*a, **kw))
+    res = build(make(plaque=True, color="color"), FakeSources(), name="Lilliput")
+    assert res.stats["plaque"] and seen and set(seen) == {"Lilliput"}
