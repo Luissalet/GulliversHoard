@@ -19,6 +19,8 @@ RoofStyle = Literal["auto", "tagged", "flat"]
 BuildingSource = Literal["auto", "osm", "cadastre"]
 TreeSource = Literal["auto", "osm"]
 DemSource = Literal["auto", "ign", "terrarium"]
+FrameStyle = Literal["flat", "bevel", "step"]
+TileCuts = Literal["straight", "streets"]
 
 
 class ModelParams(BaseModel):
@@ -41,7 +43,8 @@ class ModelParams(BaseModel):
     buildings: bool = True
     buildings_source: BuildingSource = Field("auto", description="auto: in Spain the cadastre's buildings (exact footprints and "
                                                                "floors) with OpenStreetMap's 3D parts and roofs on top; "
-                                                               "elsewhere OpenStreetMap.")
+                                                               "elsewhere OpenStreetMap, completed with the footprints traced "
+                                                               "from imagery worldwide where the map has none.")
     min_building_mm2: float = Field(0.6, ge=0, le=100, description="Drop buildings whose footprint is smaller than this on the model.")
     min_building_height_mm: float = Field(0.6, ge=0, le=20)
     roofs: RoofStyle = Field("auto", description="auto: roofs mapped in OpenStreetMap plus pitched roofs on houses and churches; "
@@ -64,13 +67,25 @@ class ModelParams(BaseModel):
     trees: bool = Field(True, description="3D trees: mapped trees and rows, woods filled densely, parks scattered.")
     tree_density: float = Field(1.0, ge=0.0, le=3.0, description="How thickly woods and parks are filled with trees.")
     tree_size_mm: float = Field(1.1, ge=0.5, le=6, description="Smallest tree crown on the model.")
-    tree_source: TreeSource = Field("auto", description="auto: in Spain every tree seen on the aerial photo (PNOA), plus mapped ones; "
-                                                         "osm: mapped trees, woods filled and parks scattered.")
+    tree_source: TreeSource = Field("auto", description="auto: every tree of the global canopy height map (with its height), the ones "
+                                                         "seen on the aerial photo in Spain and the mapped ones; osm: mapped trees, "
+                                                         "woods filled and parks scattered.")
+    landcover: bool = Field(True, description="Fill woods, grass, fields, bare rock, snow and lakes from the satellite land cover "
+                                              "(ESA WorldCover) where the map has none.")
     zones: bool = Field(True, description="Snow on high summits and bare rock on steep slopes as their own colours.")
     snow_m: float = Field(-1.0, ge=-1, le=9000, description="Snow line in metres (-1 = automatic on high mountains, 0 = none).")
     rock_slope_deg: float = Field(34.0, ge=10, le=80, description="Slopes steeper than this are bare rock (zones on).")
     ground_from_photo: bool = Field(True, description="Mountains in Spain: bare rock, meadows and woods read from the PNOA aerial "
                                     "photo (where it is unclear, rock by slope); off: rock by slope only.")
+    fields: bool = Field(True, description="Farm fields one by one (cadastre parcels in Spain, traced from satellite images "
+                                           "elsewhere) in their own colour, their edges as fine grooves.")
+    field_rows: bool = Field(True, description="Crop rows engraved inside each field along its long side (vineyards and "
+                                               "orchards closer together).")
+    row_spacing_mm: float = Field(1.4, ge=0.8, le=5, description="Distance between engraved crop rows.")
+    plazas: bool = Field(True, description="Squares and pedestrian areas in their own lighter colour (colour mode).")
+    dsm_heights: bool = Field(True, description="Real heights of every building, with towers and spires as their own volumes, from "
+                                                "the laser surface model where one is open (Netherlands, France, England, NRW, "
+                                                "Switzerland, Flanders, Norway, Poland).")
     meadows: bool = Field(False, description="Colour all open land green (mountains and countryside), not only mapped parks and woods.")
     max_relief_ratio: float = Field(0.3, ge=0.05, le=2.0, description="The relief is kept at most this share of the model's longest "
                                                                          "side, lowering the vertical exaggeration if needed.")
@@ -80,6 +95,22 @@ class ModelParams(BaseModel):
     frame_mm: float = Field(0.0, ge=0, le=40, description="Width of a raised frame around the model (0 = none).")
     label: str = Field("", max_length=80, description="Text engraved on the bottom; empty = name, coordinates and scale.")
     label_bottom: bool = True
+    frame_style: FrameStyle = Field("flat", description="flat: a plain raised band; bevel: its outer edge chamfered; step: a lower "
+                                                        "outer ledge and a higher inner rim.")
+    plaque: bool = Field(False, description="Raised plaque on the south side of the frame: title, coordinates and scale, a north "
+                                            "arrow and a scale bar (the frame is widened to fit).")
+    plaque_text: str = Field("", max_length=60, description="Title of the plaque; empty = the model's name.")
+    # personal touches
+    highlight_lon: Optional[float] = Field(None, ge=-180, le=180, description="A place to highlight in gold (your home): the "
+                                                                              "building under it, or a marker where there is none.")
+    highlight_lat: Optional[float] = Field(None, ge=-84, le=84)
+    track: str = Field("", max_length=8_000_000, description="A route (GPX, KML or GeoJSON text) raised as a ribbon in its own colour.")
+    track_width_mm: float = Field(0.9, ge=0.4, le=5, description="Width of the route ribbon.")
+    track_height_mm: float = Field(0.6, ge=0.2, le=4, description="How far the route ribbon stands above the ground.")
+    # printability
+    nozzle_mm: float = Field(0.4, ge=0.1, le=1.2, description="Nozzle of the printer, for the printability report.")
+    thicken: bool = Field(False, description="Widen features narrower than two nozzle passes (streets, rails, paths, thin buildings, "
+                                             "tiny trees) so they print.")
     # tiles
     tiles_x: int = Field(1, ge=1, le=12)
     tiles_y: int = Field(1, ge=1, le=12)
@@ -87,6 +118,11 @@ class ModelParams(BaseModel):
     pin_diameter_mm: float = Field(1.9, ge=0.8, le=8, description="Holes for alignment pins (1.9 fits 1.75 mm filament).")
     pin_depth_mm: float = Field(5.0, ge=1, le=30)
     tile_labels: bool = True
+    panels_x: int = Field(1, ge=1, le=6, description="Framed panels across: the model split into pictures that hang side by side, "
+                                                    "each with its own frame (the landscape runs on from one to the next).")
+    panels_y: int = Field(1, ge=1, le=6, description="Framed panels down.")
+    tile_cuts: TileCuts = Field("straight", description="straight: tiles cut along straight lines; streets: the seams follow "
+                                                        "streets near the straight line, so no building is cut in two.")
     # output
     color: ColorMode = "color"
     dem: DemSource = "auto"
@@ -153,6 +189,10 @@ class ModelParams(BaseModel):
 
     def tile_size_mm(self) -> tuple[float, float]:
         w, h = self.model_size_mm
+        if self.panels_x * self.panels_y > 1:              # each framed panel: its share of the map plus its own frame
+            fr = self.frame_mm if self.frame_mm > 0 else 8.0
+            fr = max(fr, 14.0) if self.plaque else fr
+            return w / self.panels_x + 2 * fr, h / self.panels_y + 2 * fr
         return (w + 2 * self.frame_mm) / self.tiles_x, (h + 2 * self.frame_mm) / self.tiles_y
 
     def estimated_cells(self) -> int:
@@ -172,6 +212,7 @@ PRESETS = {
 }
 
 MAX_CELLS = 3_000_000
+NULLABLE = {"highlight_lon", "highlight_lat"}      # an explicit null clears these on an update
 
 
 def suggest_tiles(width_mm: float, height_mm: float, bed_x: float, bed_y: float, margin: float = 6.0) -> tuple[int, int]:

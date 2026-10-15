@@ -21,7 +21,7 @@ from .jobs import Job, Jobs
 from .mesh.build import PART_COLORS, PART_LABELS, build
 from .worker import run_isolated
 from .outputs import write_outputs
-from .params import MAX_CELLS, PRESETS, ModelParams, suggest_tiles
+from .params import MAX_CELLS, PRESETS, ModelParams, suggest_tiles, NULLABLE
 from .projects import Projects, new_id
 from .sources import Sources
 from .sources import dem as dem_mod
@@ -96,7 +96,7 @@ class Services:
             if preset not in PRESETS:
                 raise GulliverError("invalid", f"Unknown preset {preset!r}.", "Use city, landscape or relief.")
             merged.update(PRESETS[preset])
-        merged.update({k: v for k, v in (values or {}).items() if v is not None})
+        merged.update({k: v for k, v in (values or {}).items() if v is not None or k in NULLABLE})
         if "dem" not in (values or {}) and not base:
             merged["dem"] = self.settings["dem"]
         return ModelParams(**merged)

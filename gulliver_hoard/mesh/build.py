@@ -9,7 +9,10 @@ same solid is partitioned into parts (one per filament) that fit each other exac
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import pickle
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -24,9 +27,18 @@ from ..errors import Cancelled, GulliverError
 from ..geo import format_coord, nice_scale
 from ..params import MAX_CELLS, ModelParams
 from ..sources import aerial as aerial_mod
+from ..sources import canopy as canopy_mod
 from ..sources import catastro as catastro_mod
+from ..sources import landcover as landcover_mod
+from ..sources import msbuildings as msb_mod
+from ..sources import dsm as dsm_mod
 from ..sources import osm as osm_mod
+from .. import printability
+from .. import track as track_mod
+from . import plaque as plaque_mod
+from . import seams as seams_mod
 from . import detail
+from . import fields as fields_mod
 from . import solids as S
 
 PART_COLORS = {
@@ -36,7 +48,12 @@ PART_COLORS = {
     "roads": "#8A8478",
     "rails": "#6B6660",
     "green": "#7FA56A",
+    "fields": "#A9C47F",
     "trees": "#3E7A3A",
+    "plazas": "#CFC8B8",
+    "track": "#D2462D",
+    "highlight": "#D4A017",
+    "plaque": "#2F2B27",
     "rock": "#9A968F",
     "snow": "#F7F7F4",
     "frame": "#3A3A3A",
@@ -49,6 +66,11 @@ PART_LABELS = {
     "rails": ("Vías del tren", "Railways"),
     "green": ("Zonas verdes", "Green areas"),
     "trees": ("Árboles", "Trees"),
+    "plazas": ("Plazas", "Squares"),
+    "fields": ("Campos", "Fields"),
+    "track": ("Ruta", "Route"),
+    "highlight": ("Tu sitio", "Your place"),
+    "plaque": ("Placa", "Plaque"),
     "rock": ("Roca", "Rock"),
     "snow": ("Nieve", "Snow"),
     "frame": ("Marco", "Frame"),
@@ -65,6 +87,13 @@ CONTOUR_MM = 0.5              # width of an engraved contour line
 PATH_KINDS = {"footway", "path", "cycleway", "steps", "bridleway", "track", "pedestrian"}
 WATER_REACH_M = 150.0         # the water level at a point is never above the lowest ground this far along the water
 LABEL_DEPTH_MM = 0.6
+FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
+ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
+STAGE_VERSION = 1             # bump when the gathered map data changes shape
+STAGE_MAX_AGE_S = 7 * 86400
+PLAQUE_FRAME_MM = 14.0
+PANEL_FRAME_MM = 8.0          # frame of each panel when the model is split into framed panels and no frame was asked        # narrowest frame that carries a plaque
+PLAQUE_MM = 0.6               # the plaque's letters stand this high (and sink as deep into the frame)
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
 
 Progress = Callable[[float, str], None]
@@ -276,6 +305,22 @@ def _supported(i: int, cands: list[tuple[Any, Any]], tree: Any, min_height_m: fl
     return covered >= 0.5 * shape.area
 
 
+def _stage_key(p: ModelParams) -> str:
+    """What decides the gathered map data (sources, area, the layers asked for): not print settings like size of text,
+    frame or tiles. The scale counts only through the gates that depend on it."""
+    k = p.scale_mm_per_m
+    keys = ("lon", "lat", "width_m", "height_m", "dem", "buildings", "buildings_source", "water", "waterways", "rails", "green",
+            "landcover", "zones", "trees", "fields", "meadows", "dsm_heights")
+    d = {n: getattr(p, n) for n in keys}
+    d.update(roads=p.roads != "none", dsm_scale=k >= 0.012, parcel_scale=k >= 0.0015, v=STAGE_VERSION)
+    return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
+
+
+def _union_mm(geoms: list[Any]) -> Any:
+    gs = [g for g in geoms if g is not None and not g.is_empty]
+    return shapely.union_all(np.array(gs, dtype=object)) if gs else None
+
+
 def _line_buffer(lines: list[tuple[Any, float]]) -> Any:
     """Union of lines buffered by their half widths (flat caps would leave gaps at joints, so round joins and caps)."""
     if not lines:
@@ -284,6 +329,183 @@ def _line_buffer(lines: list[tuple[Any, float]]) -> Any:
     if not pieces:
         return None
     return shapely.union_all(np.array(pieces, dtype=object))
+
+
+def _apply_landcover(feats: Any, classes: np.ndarray, bounds: tuple[float, float, float, float], proj: Any,
+                     relief_m: float, p: ModelParams) -> tuple[list[str], Any]:
+    """Adds the satellite land cover to what the map has: woods everywhere (inside a town only big ones: a street's
+    canopy is not a wood), grass and scrub outside towns, fields with ``meadows``, bare ground as rock in the mountains,
+    snow and ice, lakes nobody traced. Returns what was added and the extra water (sea removed later)."""
+    lc = landcover_mod
+    used: list[str] = []
+    union = lambda *gs: shapely.union_all(np.array([g for g in gs if g is not None and not g.is_empty] or [Polygon()],  # noqa: E731
+                                                   dtype=object))
+    town = lc.area(classes, bounds, proj, (lc.BUILT,), smooth_m=25.0, min_area_m2=3000.0)
+    town = town.buffer(60.0) if town is not None else None
+    known_green = feats.green.buffer(5.0) if feats.green is not None else None
+
+    def fresh(g: Any, min_m2: float) -> Any:
+        if g is None or g.is_empty:
+            return None
+        if known_green is not None:
+            g = g.difference(known_green)
+        g = g.buffer(-4.0).buffer(4.0)                      # no slivers along what the map already has
+        keep = [q for q in S.polygons(g) if q.area >= min_m2]
+        return shapely.union_all(np.array(keep, dtype=object)) if keep else None
+
+    if p.green or p.trees:
+        woods = lc.area(classes, bounds, proj, lc.GROUPS["woods"], smooth_m=10.0, min_area_m2=800.0)
+        if woods is not None and town is not None:
+            big = [q for q in S.polygons(woods.intersection(town)) if q.area >= 20000.0]
+            woods = union(woods.difference(town), *big)
+        woods = fresh(woods, 800.0)
+        if woods is not None:
+            feats.woods = union(feats.woods, woods)
+            feats.green = union(feats.green, woods)
+            used.append("woods")
+    if p.fields:
+        crops = lc.area(classes, bounds, proj, (lc.CROPS,), smooth_m=10.0, min_area_m2=2500.0)
+        if crops is not None and town is not None:
+            crops = crops.difference(town)
+        if crops is not None and feats.farmland:
+            crops = crops.difference(union(*[g for g, _k in feats.farmland]).buffer(5.0))
+        crops = fresh(crops, 2500.0)
+        if crops is not None:
+            feats.crops = crops
+            used.append("fields")
+    if p.green:
+        open_land = lc.area(classes, bounds, proj, (lc.SHRUB, lc.GRASS, lc.WETLAND, lc.MOSS) + ((lc.CROPS,) if p.meadows else ()),
+                            smooth_m=15.0, min_area_m2=2500.0)
+        if open_land is not None and town is not None:
+            open_land = open_land.difference(town)
+        open_land = fresh(open_land, 2500.0)
+        if open_land is not None:
+            feats.green = union(feats.green, open_land)
+            used.append("green")
+    if p.zones:
+        if relief_m >= 150.0:
+            rock = lc.area(classes, bounds, proj, lc.GROUPS["rock"], smooth_m=15.0, min_area_m2=2500.0)
+            if rock is not None:
+                feats.rock = union(feats.rock, rock)
+                used.append("rock")
+        snow = lc.area(classes, bounds, proj, lc.GROUPS["snow"], smooth_m=12.0, min_area_m2=2000.0)
+        if snow is not None:
+            feats.ice = union(feats.ice, snow)
+            used.append("snow")
+    water = None
+    if p.water:
+        water = lc.area(classes, bounds, proj, lc.GROUPS["water"], smooth_m=8.0, min_area_m2=3000.0)
+        if water is not None and feats.water is not None:
+            water = water.difference(feats.water.buffer(15.0))
+        if water is not None:
+            water = water.buffer(-6.0).buffer(6.0)
+            keep = [q for q in S.polygons(water) if q.area >= 3000.0]
+            water = shapely.union_all(np.array(keep, dtype=object)) if keep else None
+        if water is not None:
+            used.append("water")
+    return used, water
+
+
+def _seam_pins(tiles: list[dict[str, Any]], outer: Any, building_shapes: list[Any], diameter: float, depth: float,
+               z: float) -> tuple[Any, list[dict[str, Any]]]:
+    """Pin holes across street-following seams: square to the seam where it runs, clear of buildings and of the edge."""
+    from manifold3d import Manifold
+
+    r = diameter / 2.0
+    safe = outer.buffer(-(r + 1.5))
+    avoid = shapely.union_all(np.array(building_shapes, dtype=object)).buffer(r + 0.5) if building_shapes else None
+    holes, where = [], []
+    for seam in seams_mod.seam_lines(tiles):
+        for x, y, angle in seams_mod.pin_points(seam, avoid=avoid):
+            a = math.radians(angle + 90.0)
+            dx, dy = math.cos(a) * (depth + 1), math.sin(a) * (depth + 1)
+            if not safe.contains(LineString([(x - dx, y - dy), (x + dx, y + dy)])):
+                continue
+            cyl = Manifold.cylinder(2 * depth, r, r, 24, True).rotate((0.0, 90.0, 0.0)).rotate((0.0, 0.0, angle + 90.0))
+            holes.append(cyl.translate((x, y, z)))
+            where.append({"x": round(x, 2), "y": round(y, 2), "angle": round(angle + 90.0, 1)})
+    return S.union(holes), where
+
+
+def _frame(inner: Any, frame_mm: float, style: str, join: str, Z0: np.ndarray, xs: np.ndarray, ys: np.ndarray, W: float,
+           H: float, *, plaque: bool, title: str, subtitle: str, k: float, stroke: float) -> tuple[Any, Any, Any, Any, bool]:
+    """A frame around the outline ``inner`` in its style (flat, bevel, step), standing 1 mm over the ground along its edge,
+    with the plaque on its south side. Returns (frame, frame for unions — reaching 0.05 mm into the model so the two never
+    share a wall —, plaque, outer outline, whether the plaque fitted). In colour the plaque is inlaid: the frame is cut
+    where the letters go."""
+    outer = inner.buffer(frame_mm, join_style=join)
+    boundary = inner.exterior
+    pts = np.array([boundary.interpolate(t, normalized=True).coords[0] for t in np.linspace(0, 1, 400)])
+    edge_z = _sample(Z0, xs, ys, np.clip(pts[:, 0], 0, W), np.clip(pts[:, 1], 0, H))
+    frame_top = float(np.percentile(edge_z, 90)) + 1.0
+    ring = outer.difference(inner)
+    top_face = outer
+    if style == "bevel":
+        c = min(frame_mm * 0.25, frame_top * 0.5)
+        top_face = outer.buffer(-c, join_style=join)
+        frame = S.union([S.prism(outer, 0.0, frame_top - c), _chamfer(outer, top_face, frame_top - c, frame_top)])
+        frame = S.subtract(frame, [S.prism(inner, -1.0, frame_top + 1.0)])
+    elif style == "step":
+        ledge = min(1.6, frame_top * 0.4)
+        top_face = inner.buffer(frame_mm * 0.6, join_style=join)
+        frame = S.union([S.prism(ring, 0.0, frame_top - ledge), S.prism(top_face.difference(inner), 0.0, frame_top)])
+    else:
+        frame = S.prism(ring, 0.0, frame_top)
+    joined = S.union([frame, S.prism(inner.difference(inner.buffer(-0.05, join_style="mitre")), 0.0, frame_top)])
+    solid = S.EMPTY
+    drawn = False
+    if plaque:
+        found = plaque_mod.plaque_strip(top_face, inner, "south")
+        if found is not None:
+            rect, angle = found
+            rx0, ry0, rx1, ry1 = rect.bounds
+            lay = plaque_mod.plaque_layout(rx1 - rx0, ry1 - ry0, title=title, subtitle=subtitle, scale_mm_per_m=k,
+                                           min_stroke_mm=stroke)
+            if not lay.is_empty:
+                lay = plaque_mod.place(lay, rect, angle, (rx1 - rx0, ry1 - ry0))
+                solid = S.prism(lay, frame_top - PLAQUE_MM, frame_top + PLAQUE_MM)
+                frame = S.subtract(frame, [solid])
+                drawn = True
+    return frame, joined, solid, outer, drawn
+
+
+def _chamfer(bottom: Any, top: Any, z0: float, z1: float) -> Any:
+    """A sloped band from the outline ``bottom`` at ``z0`` to the smaller ``top`` at ``z1`` (hull of two thin slabs)."""
+    lo = S.prism(bottom, z0 - 0.01, z0)
+    hi = S.prism(top, z1 - 0.01, z1)
+    return (lo + hi).hull() if S.polygons(bottom) and len(S.polygons(bottom)) == 1 else S.prism(top, z0, z1)
+
+
+def _apply_dsm(feats: Any, heights: np.ndarray, bounds: tuple[float, float, float, float], proj: Any, is_ndsm: bool) -> int:
+    """Buildings drawn as plain outlines (no 3D parts mapped) take their roof height from the surface model, and each
+    tower or spire found on them becomes a part of its own standing on the roof. Returns how many were measured."""
+    outlines = [b for b in feats.buildings if not b.part]
+    parts = [b for b in feats.buildings if b.part]
+    if parts:
+        tree = shapely.STRtree([q.shape for q in parts])
+        outlines = [b for b in outlines if not len(tree.query(b.shape, predicate="intersects"))]
+    if not outlines:
+        return 0
+    others = shapely.union_all(np.array([b.shape for b in feats.buildings], dtype=object))
+    found = dsm_mod.building_heights(heights, bounds, proj, [b.shape for b in outlines], is_ndsm=is_ndsm, others=others,
+                                     ground_pct=8.0)
+    n = 0
+    towers = []
+    for b, h in zip(outlines, found):
+        if not h or not h.get("roof_m") or h["roof_m"] < 2.5:
+            continue
+        b.height_m = float(h["roof_m"])
+        b.estimated = False
+        n += 1
+        for poly, top in h.get("towers") or []:
+            if top - b.height_m < 4.0 or poly.is_empty:
+                continue
+            pointed = poly.area < 80.0 and top - b.height_m > 12.0
+            towers.append(osm_mod.Building(poly, float(top), b.height_m, "tower", b.name, False,
+                                           roof="pyramidal" if pointed else "", 
+                                           roof_height_m=(top - b.height_m) * 0.45 if pointed else None, part=True))
+    feats.buildings.extend(towers)
+    return n
 
 
 def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = None, cancelled: Optional[Callable[[], bool]] = None,
@@ -347,33 +569,122 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     Z = Z0.copy()
     clock.log(f"Relief {np.nanmin(land):.0f}-{np.nanmax(land):.0f} m -> {Z0.min():.1f}-{Z0.max():.1f} mm, smoothing {sigma:.1f} cells")
 
-    # 2. OpenStreetMap ----------------------------------------------------------------------------------------------------
-    needs_osm = p.buildings or p.water or p.waterways or p.roads != "none" or p.rails or p.green
-    feats = osm_mod.Features()
-    if needs_osm:
-        clock.step(0.15, "OpenStreetMap")
-        raw = sources.osm(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
-        feats = osm_mod.parse(raw, proj, area.width_m, area.height_m, pad_m=pad_m)
-        attribution.append(osm_mod.ATTRIBUTION)
-        clock.log(f"{len(feats.buildings)} buildings, {len(feats.roads)} roads, {len(feats.waterways)} waterways, "
-                  f"{len(feats.rails)} rails")
-    building_source = "osm"
-    if p.buildings and p.buildings_source != "osm" and hasattr(sources, "catastro"):
+    # 2-2b. map data, gathered once per area and kept: a model rebuilt with other print settings skips straight to the mesh
+    fetcher = getattr(sources, "fetcher", None)
+    stage_key = _stage_key(p) if fetcher is not None else ""
+    staged = None
+    if fetcher is not None:
         try:
-            parts = sources.catastro(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
-        except GulliverError as exc:
-            parts = None
-            notes.append(f"The cadastre did not answer ({exc.message}); buildings from OpenStreetMap.")
-        if parts:
-            clip_m = box(-area.width_m / 2 - pad_m, -area.height_m / 2 - pad_m, area.width_m / 2 + pad_m, area.height_m / 2 + pad_m)
-            cad = catastro_mod.to_buildings(parts, proj, clip_m)
-            if cad:
-                feats.buildings = catastro_mod.merge(feats.buildings, cad)
-                building_source = "cadastre"
-                attribution.append(catastro_mod.ATTRIBUTION)
-                clock.log(f"{len(cad)} building parts from the cadastre")
-        elif p.buildings_source == "cadastre":
-            notes.append("The cadastre has no buildings here (outside Spain, or Navarre / the Basque Country); OpenStreetMap's were used.")
+            hit = fetcher.cached("stages", stage_key, ".pkl", STAGE_MAX_AGE_S)
+            staged = pickle.loads(hit) if hit else None
+        except Exception:  # noqa: BLE001 - a stale or broken entry is simply rebuilt
+            staged = None
+    if staged is not None:
+        (feats, building_source, footprints_added, lc_water, landcover_used, dsm_used, added_notes, added_attr) = staged
+        notes.extend(added_notes)
+        attribution.extend(added_attr)
+        clock.step(0.15, "Map data (kept from the last build of this area)")
+    else:
+        notes0, attr0 = len(notes), len(attribution)
+        # 2. OpenStreetMap ----------------------------------------------------------------------------------------------------
+        needs_osm = p.buildings or p.water or p.waterways or p.roads != "none" or p.rails or p.green
+        feats = osm_mod.Features()
+        if needs_osm:
+            clock.step(0.15, "OpenStreetMap")
+            raw = sources.osm(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
+            feats = osm_mod.parse(raw, proj, area.width_m, area.height_m, pad_m=pad_m)
+            attribution.append(osm_mod.ATTRIBUTION)
+            clock.log(f"{len(feats.buildings)} buildings, {len(feats.roads)} roads, {len(feats.waterways)} waterways, "
+                      f"{len(feats.rails)} rails")
+        building_source = "osm"
+        if p.buildings and p.buildings_source != "osm" and hasattr(sources, "catastro"):
+            try:
+                parts = sources.catastro(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
+            except GulliverError as exc:
+                parts = None
+                notes.append(f"The cadastre did not answer ({exc.message}); buildings from OpenStreetMap.")
+            if parts:
+                clip_m = box(-area.width_m / 2 - pad_m, -area.height_m / 2 - pad_m, area.width_m / 2 + pad_m, area.height_m / 2 + pad_m)
+                cad = catastro_mod.to_buildings(parts, proj, clip_m)
+                if cad:
+                    feats.buildings = catastro_mod.merge(feats.buildings, cad)
+                    building_source = "cadastre"
+                    attribution.append(catastro_mod.ATTRIBUTION)
+                    clock.log(f"{len(cad)} building parts from the cadastre")
+            elif p.buildings_source == "cadastre":
+                notes.append("The cadastre has no buildings here (outside Spain, or Navarre / the Basque Country); OpenStreetMap's were used.")
+        # worldwide fills: footprints traced from imagery where the map has no buildings, land cover where it has no woods,
+        # fields, rock, snow or lakes (a village in the Amazon gets its houses and its forest)
+        footprints_added = 0
+        if p.buildings and building_source != "cadastre" and p.buildings_source == "auto" and hasattr(sources, "footprints"):
+            try:
+                items = sources.footprints(area.bbox_padded(pad_m), progress=clock.log)
+            except GulliverError as exc:
+                items = []
+                notes.append(f"The worldwide building footprints were not used ({exc.message}).")
+            except Exception as exc:  # noqa: BLE001 - an optional source never stops a build
+                items = []
+                notes.append(f"The worldwide building footprints could not be read ({exc}).")
+            if items:
+                clip_m = box(-area.width_m / 2 - pad_m, -area.height_m / 2 - pad_m, area.width_m / 2 + pad_m, area.height_m / 2 + pad_m)
+                extra = msb_mod.to_buildings(items, proj, clip_m)
+                had = len(feats.buildings)
+                feats.buildings, footprints_added, adopted = msb_mod.fill(feats.buildings, extra)
+                if footprints_added or adopted:
+                    attribution.append(msb_mod.ATTRIBUTION)
+                    building_source = "osm+footprints" if had else "footprints"
+                    clock.log(f"{footprints_added} buildings from the worldwide footprints, {adopted} heights taken from them")
+        lc_water = None
+        landcover_used: list[str] = []
+        if p.landcover and (p.green or p.zones or p.water or p.trees) and hasattr(sources, "landcover"):
+            try:
+                classes, lc_bounds = sources.landcover(area.bbox_padded(pad_m), progress=clock.log)
+            except GulliverError as exc:
+                classes = None
+                notes.append(f"The satellite land cover was not used ({exc.message}).")
+            except Exception as exc:  # noqa: BLE001
+                classes = None
+                notes.append(f"The satellite land cover could not be read ({exc}).")
+            if classes is not None and classes.any():
+                landcover_used, lc_water = _apply_landcover(feats, classes, lc_bounds, proj, relief_m, p)
+                if landcover_used:
+                    attribution.append(landcover_mod.ATTRIBUTION)
+                    clock.log("Land cover: " + ", ".join(landcover_used))
+        # Spain: the cadastre's farm parcels tell one field from the next where the map only has the whole farmland
+        if p.fields and (feats.farmland or feats.crops is not None) and hasattr(sources, "catastro_parcels") and k >= 0.0015:
+            try:
+                raw_parcels = sources.catastro_parcels(area.bbox_padded(pad_m), progress=clock.log, cancelled=cancelled)
+            except GulliverError as exc:
+                raw_parcels = None
+                notes.append(f"The cadastre's parcels did not load ({exc.message}).")
+            if raw_parcels:
+                feats.parcels = catastro_mod.to_parcels(raw_parcels, proj)
+                if feats.parcels:
+                    attribution.append(catastro_mod.PARCEL_ATTRIBUTION)
+                    clock.log(f"{len(feats.parcels)} farm parcels from the cadastre")
+        # real heights from a laser surface model where one is open: every roof at its height, towers and spires on top
+        dsm_used = 0
+        if (p.buildings and p.dsm_heights and feats.buildings and hasattr(sources, "dsm") and area.km2 <= 25.0
+                and dsm_mod.provider_for(area.bbox) is not None and k >= 0.012):
+            try:
+                hts, hb, dsm_attr, is_ndsm = sources.dsm(area.bbox_padded(30.0), res_m=1.0 if area.km2 <= 9.0 else 2.0,
+                                                        progress=clock.log)
+                dsm_used = _apply_dsm(feats, hts, hb, proj, is_ndsm)
+                if dsm_used:
+                    attribution.append(dsm_attr)
+                    clock.log(f"{dsm_used} buildings measured on the surface model")
+            except GulliverError as exc:
+                notes.append(f"The surface model was not used ({exc.message}).")
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"The surface model could not be read ({exc}).")
+        failed = any(w in n for n in notes[notes0:] for w in ("could not", "did not", "was not used", "not answer"))
+        if fetcher is not None and not failed:
+            try:
+                fetcher.store("stages", stage_key, pickle.dumps((feats, building_source, footprints_added, lc_water,
+                                                                 landcover_used, dsm_used, notes[notes0:], attribution[attr0:]),
+                                                                protocol=pickle.HIGHEST_PROTOCOL), ".pkl")
+            except Exception:  # noqa: BLE001
+                pass
     model_box = box(0.0, 0.0, W_mm, H_mm)
     footprint = S.outline(p.shape, W_mm, H_mm)
     to_mm = lambda g: _to_mm(g, k, area.width_m, area.height_m)  # noqa: E731
@@ -428,6 +739,24 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             pg = pg.difference(road_shape.buffer(0.1))
         path_shape = _unpinch(pg) if not pg.is_empty else None
 
+    if p.thicken:                               # two nozzle passes at least: every groove and bed prints
+        w2 = 2.0 * p.nozzle_mm
+        road_shape = printability.thicken(road_shape, w2) if road_shape is not None else None
+        rail_shape = printability.thicken(rail_shape, w2) if rail_shape is not None else None
+        path_shape = printability.thicken(path_shape, w2) if path_shape is not None else None
+    # a route of the owner's (a hike, a run, the way to school) as a raised ribbon
+    track_shape = None
+    if p.track.strip():
+        lines = track_mod.to_metres(track_mod.parse(p.track), proj)
+        tl = [(to_mm(l), p.track_width_mm) for l in lines]
+        tl = [(l, w) for l, w in tl if l is not None and not l.is_empty]
+        if tl:
+            tg = _line_buffer(tl)
+            tg = tg.intersection(model_box.buffer(-0.3)) if tg is not None else None
+            track_shape = _unpinch(tg) if tg is not None and not tg.is_empty else None
+        if track_shape is None:
+            notes.append("The route does not cross this area.")
+
     # sea outline traced from the elevation (low pockets inland are not sea)
     sea_poly = None
     if sea.any():
@@ -441,6 +770,12 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         pieces = []
         if p.water and feats.water is not None:
             pieces.append(to_mm(feats.water))
+        if lc_water is not None:                     # lakes seen from space, never the sea (it is traced from the elevation)
+            extra_w = to_mm(lc_water)
+            if sea_poly is not None and extra_w is not None:
+                extra_w = extra_w.difference(sea_poly.buffer(0.5))
+            if extra_w is not None and not extra_w.is_empty:
+                pieces.append(extra_w)
         if p.waterways and feats.waterways:
             lines = [(to_mm(line), max(w * k, 0.6)) for line, w, kind in feats.waterways
                      if kind in ("river", "canal") or w * k >= 0.35]
@@ -451,6 +786,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             water_geom = shapely.union_all(np.array(pieces, dtype=object)).intersection(model_box.buffer(1.0))
             water_geom = _unpinch(water_geom) if not water_geom.is_empty else None
     water_mask = _inside(water_geom, X, Y) | sea
+    if track_shape is not None and (water_geom is not None or sea_poly is not None):
+        wet_all = shapely.union_all(np.array([g for g in (water_geom, sea_poly) if g is not None], dtype=object))
+        track_shape = track_shape.difference(wet_all.buffer(0.1))
+        track_shape = _unpinch(track_shape) if not track_shape.is_empty else None
 
     # contour lines: traced from the elevation as lines, engraved below as a cut that follows them exactly
     interval = p.contour_interval(relief_m)
@@ -474,12 +813,50 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             contour_shape = _unpinch(contour_shape) if not contour_shape.is_empty else None
         clock.log(f"Contour lines every {interval:g} m")
 
+    # farm fields: the farmland cut into parcels along every line that separates two of them, with crop rows
+    field_parcels: list[Any] = []
+    fields_shape = None
+    rows_shape = None
+    field_gaps = None
+    if p.fields and (feats.farmland or feats.crops is not None):
+        mask = _union_mm([to_mm(g) for g, _k in feats.farmland] + [to_mm(feats.crops)])
+        if mask is not None:
+            mask = mask.intersection(model_box)
+            off = [to_mm(feats.woods), to_mm(feats.parks), water_geom, sea_poly, road_shape, rail_shape, track_shape]
+            off = [g for g in off if g is not None and not g.is_empty]
+            if off:
+                mask = mask.difference(shapely.union_all(np.array(off, dtype=object)))
+        if mask is not None and not mask.is_empty:
+            edges = [to_mm(g) for g, _k in feats.farmland] + [to_mm(g) for g in feats.parcels]
+            edges += [l for l, _w in road_lines] + [l for l, _w in path_lines] + [l for l, _w in rail_lines]
+            edges += [to_mm(l) for l, _w, _kd in feats.waterways] + [to_mm(l) for l in feats.hedges]
+            field_parcels = fields_mod.parcels(mask, edges, gap_mm=FIELD_GAP_MM, min_area_mm2=max(2.0, 4 * p.row_spacing_mm ** 2))
+            if field_parcels:
+                fields_shape = _unpinch(shapely.union_all(np.array(field_parcels, dtype=object)))
+                field_gaps = mask.difference(fields_shape.buffer(0.01))
+                if p.field_rows:
+                    kinds = [(to_mm(g), kd) for g, kd in feats.farmland]
+                    rows_shape = fields_mod.all_rows(field_parcels, kinds, p.row_spacing_mm, max(0.4, p.nozzle_mm))
+                    rows_shape = _unpinch(rows_shape) if rows_shape is not None and not rows_shape.is_empty else None
+                # tracks across the fields are paths too (grooves in one colour, ground between the fields in colour)
+                if path_lines:
+                    ft = _line_buffer(path_lines).intersection(mask.buffer(0.3))
+                    if road_shape is not None:
+                        ft = ft.difference(road_shape.buffer(0.1))
+                    if not ft.is_empty:
+                        path_shape = _unpinch(ft if path_shape is None else path_shape.union(ft))
+                clock.log(f"{len(field_parcels)} fields" + (" with crop rows" if rows_shape is not None else ""))
+
     # 4. terrain solid --------------------------------------------------------------------------------------------------
     # roads and contour lines are cut from the solid along their real outlines (never stepped along the grid): the cut is
     # the outline's prism above a copy of the terrain lowered by the depth, so the floor follows the ground
     clock.step(0.35, "Terrain solid")
     terrain = S.heightfield(Z, xs, ys)
     top = float(Z.max())
+    track_raise = S.EMPTY
+    if track_shape is not None:
+        track_raise = S.intersect(S.prism(track_shape, 0.3, top + p.track_height_mm + 5.0),
+                                  _shifted(terrain, p.track_height_mm, W_mm, H_mm, -0.05))
     over_top = top + max(p.road_depth_mm, p.rail_height_mm) + 5.0
     raises = []
     if road_shape is not None and p.roads == "raised":
@@ -496,6 +873,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                                       [_shifted(terrain, -min(0.25, p.road_depth_mm), W_mm, H_mm, 0.05)]))
     if road_shape is not None and p.roads == "engraved":
         relief_cuts.append(S.subtract(S.prism(road_shape, -1.0, over_top), [_shifted(terrain, -p.road_depth_mm, W_mm, H_mm, 0.05)]))
+    if rows_shape is not None:
+        relief_cuts.append(S.subtract(S.prism(rows_shape, -1.4, over_top), [_shifted(terrain, -ROW_DEPTH_MM, W_mm, H_mm, 0.05)]))
+    if field_gaps is not None and not field_gaps.is_empty and p.color == "mono":
+        relief_cuts.append(S.subtract(S.prism(field_gaps, -1.5, over_top), [_shifted(terrain, -ROW_DEPTH_MM, W_mm, H_mm, 0.05)]))
     if contour_shape is not None:
         relief_cuts.append(S.subtract(S.prism(contour_shape, -1.3, over_top),
                                       [_shifted(terrain, -p.contour_depth_mm, W_mm, H_mm, 0.05)]))
@@ -695,6 +1076,28 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             building_solids.append(solid)
             building_shapes.append(shape)
         clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof), {dropped} too small")
+    # the owner's place: the building under the point (with its towers) in gold, or a marker standing there
+    highlight = S.EMPTY
+    highlight_kind = ""
+    if p.highlight_lon is not None and p.highlight_lat is not None:
+        hx, hy = proj.fwd(p.highlight_lon, p.highlight_lat)
+        hp = Point(float(hx) * k + area.width_m * k / 2.0, float(hy) * k + area.height_m * k / 2.0)
+        if not model_box.contains(hp):
+            notes.append("The highlighted place is outside the model.")
+        else:
+            hits = [i for i, sh in enumerate(building_shapes) if sh.buffer(0.2).contains(hp)]
+            if hits:
+                base_i = min(hits, key=lambda i: building_shapes[i].area)
+                fp = building_shapes[base_i]
+                group = [i for i in range(len(building_shapes))
+                         if building_shapes[i].intersection(fp).area >= 0.5 * building_shapes[i].area]
+                highlight = S.union([building_solids[i] for i in group])
+                building_solids = [b for i, b in enumerate(building_solids) if i not in set(group)]
+                highlight_kind = "building"
+            else:
+                highlight = detail.marker(hp.x, hp.y, float(_sample(Z, xs, ys, np.array([hp.x]), np.array([hp.y]))[0]),
+                                          size=max(1.2, min(4.0, min(W_mm, H_mm) * 0.012)))
+                highlight_kind = "marker"
     buildings = S.union(building_solids)
 
     # 7b. what covers a mountain, read from the aerial photo (Spain): bare rock, meadow and woods where they really are,
@@ -727,40 +1130,70 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     n_trees = 0
     P, R = np.zeros((0, 2)), np.zeros(0)
     seen_from_air = False
-    if p.trees and (feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None or photo_woods is not None):
+    conifers = 0
+    trees_from: list[str] = []
+    fine = p.tree_size_mm / k <= 16.0          # a single tree is still a tree on the model (finer than about 1:15.000)
+    want_canopy = p.trees and p.tree_source == "auto" and fine and hasattr(sources, "canopy")
+    if p.trees and (want_canopy or feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None
+                    or photo_woods is not None):
         clock.step(0.62, "Trees")
         crown = p.tree_size_mm
+        kv = k * p.building_exag
+        leaf = {"needleleaved": 1, "broadleaved": 0}
         mapped = []
-        for x, y, h_m, crown_m in feats.trees:
-            pt = to_mm(Point(x, y))
-            if pt is not None:
-                mapped.append((pt.x, pt.y, max(crown_m or h_m * 0.55 or 6.0, 3.0) * k))
-        seen_from_air = False
-        # single trees from the aerial photo only where a tree is still a tree on the model (finer than about 1:15.000);
-        # further out a crown would be smaller than the smallest printable one and woods are filled instead
-        if p.tree_source == "auto" and hasattr(sources, "aerial_trees") and crown / k <= 16.0:
+        for x, y, h_m, crown_m, leaf_type in feats.trees:
+            mapped.append((x * k + area.width_m * k / 2.0, y * k + area.height_m * k / 2.0, max(crown_m or h_m * 0.55 or 6.0, 3.0) * k,
+                           (h_m or 0.0) * kv, leaf.get(leaf_type, -1)))
+        if mapped:
+            trees_from.append("map")
+
+        def add_known(found: list, label: str) -> int:
+            """Trees found by a survey (x, y, height_m, crown_m in metres), skipping the ones already known."""
+            from scipy.spatial import cKDTree
+            if not found:
+                return 0
+            F = np.asarray(found, dtype=float)
+            px, py = F[:, 0] * k + area.width_m * k / 2.0, F[:, 1] * k + area.height_m * k / 2.0
+            ok = np.ones(len(F), dtype=bool)
+            if mapped:
+                tree_idx = cKDTree(np.array([(m[0], m[1]) for m in mapped]))
+                d, _ = tree_idx.query(np.column_stack([px, py]))
+                ok = d >= np.maximum(F[:, 3] * k, crown) * 0.6
+            for i in np.nonzero(ok)[0]:
+                mapped.append((px[i], py[i], F[i, 3] * k, F[i, 2] * kv, -1))
+            if ok.any():
+                trees_from.append(label)
+            return int(ok.sum())
+
+        # the global canopy height map: every tree with its height, anywhere on Earth
+        if want_canopy:
+            try:
+                chm, chm_bounds = sources.canopy(area.bbox, progress=clock.log)
+                found = canopy_mod.trees(chm, chm_bounds, proj, min_spacing_m=crown / k * 0.8)
+                n = add_known(found, "canopy")
+                if n:
+                    attribution.append(canopy_mod.ATTRIBUTION)
+                clock.log(f"{n} trees from the canopy height map")
+            except GulliverError as exc:
+                notes.append(f"The canopy height map was not used ({exc.message}).")
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"The canopy height map could not be read ({exc}).")
+        # Spain: the aerial photo sees the small street trees the canopy map misses
+        if p.tree_source == "auto" and hasattr(sources, "aerial_trees") and fine:
             try:
                 air = sources.aerial_trees(area.bbox, proj, progress=clock.log)
             except GulliverError as exc:
                 air = None
-                notes.append(f"The aerial photo did not load ({exc.message}); trees from OpenStreetMap only.")
+                notes.append(f"The aerial photo did not load ({exc.message}).")
             if air:
-                seen_from_air = True
-                attribution.append(aerial_mod.ATTRIBUTION)
-                known = np.array([(m[0], m[1]) for m in mapped]) if mapped else np.zeros((0, 2))
-                added = 0
-                for x, y, h_m, crown_m in air:
-                    pt = to_mm(Point(x, y))
-                    if pt is None:
-                        continue
-                    if len(known) and np.min(np.hypot(known[:, 0] - pt.x, known[:, 1] - pt.y)) < max(crown_m * k, crown) * 0.6:
-                        continue                                 # already mapped
-                    mapped.append((pt.x, pt.y, crown_m * k))
-                    added += 1
-                clock.log(f"{added} trees seen on the aerial photo")
+                n = add_known(air, "aerial")
+                if n:
+                    attribution.append(aerial_mod.ATTRIBUTION)
+                clock.log(f"{n} trees seen on the aerial photo")
+        seen_from_air = "canopy" in trees_from or "aerial" in trees_from
         house_shapes = shapely.union_all(np.array(building_shapes, dtype=object)) if building_shapes else None
         light = [g for g in (house_shapes, water_geom, rail_shape) if g is not None]
-        blockers = light + [g for g in (road_shape, path_shape) if g is not None]
+        blockers = light + [g for g in (road_shape, path_shape, track_shape) if g is not None]
         blocked = shapely.union_all(np.array([g.buffer(crown * 0.3) for g in blockers], dtype=object)) if blockers else None
         blocked_light = shapely.union_all(np.array([g.buffer(crown * 0.2) for g in light], dtype=object)) if light else None
         clip = lambda g: g.intersection(model_box) if g is not None and not g.is_empty else None  # noqa: E731
@@ -768,14 +1201,20 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         woods_mm = to_mm(feats.woods) if feats.woods is not None else None
         if photo_woods is not None:
             woods_mm = photo_woods if woods_mm is None else woods_mm.union(photo_woods)
-        P, R = detail.plant(woods=clip(woods_mm), parks=clip(to_mm(feats.parks)), mapped=mapped,
-                            rows=[to_mm(l) for l in feats.tree_rows], blocked=blocked, blocked_light=blocked_light,
-                            inside=footprint.buffer(-crown * 0.6), crown_mm=crown,
-                            density=p.tree_density, rng=np.random.default_rng(seed),
-                            scatter_parks=not seen_from_air, scatter_woods=not seen_from_air)
-        trees_solid = detail.trees_solid(P, R, lambda x, y: _sample(Z, xs, ys, x, y), sink=0.3 + p.road_depth_mm)
+        P, R, TH, TK = detail.plant(woods=clip(woods_mm), parks=clip(to_mm(feats.parks)), mapped=mapped,
+                                    rows=[to_mm(l) for l in feats.tree_rows], blocked=blocked, blocked_light=blocked_light,
+                                    inside=footprint.buffer(-crown * 0.6), crown_mm=crown,
+                                    density=p.tree_density, rng=np.random.default_rng(seed),
+                                    scatter_parks=not seen_from_air, scatter_woods=not seen_from_air,
+                                    conifer_woods=clip(to_mm(feats.needle_woods)),
+                                    conifer_share=detail.conifer_share(p.lat, float(np.median(land)) if land.size else 0.0))
+        if p.thicken:
+            R = np.maximum(R, p.nozzle_mm)
+        trees_solid = detail.trees_solid(P, R, lambda x, y: _sample(Z, xs, ys, x, y), sink=0.3 + p.road_depth_mm,
+                                         heights=TH, kinds=TK)
+        conifers = int((TK == 1).sum())
         n_trees = len(P)
-        clock.log(f"{n_trees} trees")
+        clock.log(f"{n_trees} trees ({conifers} conifers)")
 
     # 9. colour layers on the terrain ----------------------------------------------------------------------------------------
     clock.step(0.68, "Parts")
@@ -787,13 +1226,13 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     zone_shapes = {}
     if p.color == "color":
         # the single-piece twin (for the STL): the same solid, never split, so it stays one closed body
-        parts[SINGLE] = S.union([terrain_body, buildings, trees_solid])
+        parts[SINGLE] = S.union([terrain_body, buildings, trees_solid, highlight, track_raise])
         ground_all = terrain_body
         # a colour layer is the top SKIN_MM of the terrain inside its outline: cutter = outline prism above the lowered
         # terrain; layer = terrain ∩ cutter and terrain -= cutter (complementary, never two coincident top faces)
         lowered = terrain_body.translate((0.0, 0.0, -SKIN_MM))
         wet = water_geom.buffer(0.05) if water_geom is not None else None   # layers stop just short of the banks
-        terrain_body = S.subtract(terrain_body, [buildings])               # once, before the layers are taken off it
+        terrain_body = S.subtract(terrain_body, [buildings, highlight])    # once, before the layers are taken off it
 
         def on_relief(shape: Any, kind: str) -> Any:
             """A road or railway layer: just inside its groove/bed walls (a wall of the layer on a wall of the groove
@@ -811,6 +1250,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             return _unpinch(out) if not out.is_empty else None
 
         areas: list[tuple[str, Any]] = [("roads", on_relief(road_shape, "road")), ("rails", on_relief(rail_shape, "rail"))]
+        if p.plazas and feats.plazas is not None:
+            areas.append(("plazas", to_mm(feats.plazas)))
         if p.zones:
             snow = []
             line_m = detail.snow_line(land, p.snow_m)
@@ -837,8 +1278,12 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             rock = [g for g in rock if g is not None and not g.is_empty]
             if rock:
                 areas.append(("rock", shapely.union_all(np.array(rock, dtype=object))))
+        if fields_shape is not None:
+            areas.append(("fields", fields_shape))
         if p.green and (green_mm is not None or p.meadows):
             g = model_box if p.meadows else green_mm      # meadows: every open bit of land is green
+            if fields_shape is not None:              # the lines between fields stay ground, never a sliver of green
+                g = g.difference(fields_shape.buffer(FIELD_GAP_MM * 1.2, join_style="mitre"))
             areas.append(("green", g))
         taken = None
         cutters = []
@@ -875,48 +1320,69 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         parts["buildings"] = buildings
         parts["water"] = water_solid
         if not trees_solid.is_empty():
-            parts["trees"] = S.subtract(trees_solid, [ground_all, buildings])
+            parts["trees"] = S.subtract(trees_solid, [ground_all, buildings, highlight])
+        if not highlight.is_empty():
+            parts["highlight"] = S.subtract(highlight, [ground_all]) if highlight_kind == "marker" else highlight
+        if not track_raise.is_empty():
+            parts["track"] = S.subtract(track_raise, [ground_all, buildings, highlight])
     else:
-        parts["terrain"] = S.union([terrain_body, buildings, trees_solid])
+        parts["terrain"] = S.union([terrain_body, buildings, trees_solid, highlight, track_raise])
 
     # 10. outline shape ----------------------------------------------------------------------------------------------------
     if p.shape != "rect":
         cutter = S.prism(footprint, -1.0, solid_top + 10.0)
         parts = {n: S.intersect(m, cutter) for n, m in parts.items()}
 
-    # 11. frame --------------------------------------------------------------------------------------------------------------
+    # 11. frame (and its plaque) ---------------------------------------------------------------------------------------------
     outer = footprint
-    if p.frame_mm > 0:
-        outer = footprint.buffer(p.frame_mm, join_style="mitre" if p.shape in ("rect", "hexagon") else "round")
-        boundary = footprint.exterior
-        pts = np.array([boundary.interpolate(t, normalized=True).coords[0] for t in np.linspace(0, 1, 400)])
-        edge_z = _sample(Z0, xs, ys, np.clip(pts[:, 0], 0, W_mm), np.clip(pts[:, 1], 0, H_mm))
-        frame_top = float(np.percentile(edge_z, 90)) + 1.0
-        frame = S.prism(outer.difference(footprint), 0.0, frame_top)
-        # for unions the frame reaches 0.05 mm into the model, so the two never meet on a coincident wall
-        joined = S.prism(outer.difference(footprint.buffer(-0.05, join_style="mitre")), 0.0, frame_top)
+    panels_n = p.panels_x * p.panels_y
+    frame_mm = p.frame_mm
+    if panels_n > 1 and frame_mm <= 0:
+        frame_mm = PANEL_FRAME_MM
+    if p.plaque and frame_mm < PLAQUE_FRAME_MM:
+        frame_mm = PLAQUE_FRAME_MM
+        notes.append(f"The frame was widened to {frame_mm:g} mm to carry the plaque.")
+    plaque_drawn = False
+    title = (p.plaque_text or name or "").strip() or format_coord(p.lon, p.lat)
+    subtitle = f"{format_coord(p.lon, p.lat)} · {nice_scale(p.scale_denominator)}"
+
+    def framed(inner: Any, join: str, sub: str) -> tuple[Any, Any, Any, Any, bool]:
+        return _frame(inner, frame_mm, p.frame_style, join, Z0, xs, ys, W_mm, H_mm, plaque=p.plaque, title=title,
+                      subtitle=sub, k=k, stroke=max(0.4, p.nozzle_mm))
+
+    if frame_mm > 0 and panels_n <= 1:
+        frame, joined, plaque, outer, plaque_drawn = framed(footprint, "mitre" if p.shape in ("rect", "hexagon") else "round",
+                                                            subtitle)
+        if p.plaque and not plaque_drawn:
+            notes.append("The plaque did not fit on the frame.")
         if p.color == "color":
+            if not plaque.is_empty():
+                parts["plaque"] = plaque
             parts["frame"] = frame
-            parts[SINGLE] = S.union([parts[SINGLE], joined])
+            parts[SINGLE] = S.union([parts[SINGLE], joined, plaque])
         else:
-            parts["terrain"] = S.union([parts["terrain"], joined])
+            parts["terrain"] = S.union([parts["terrain"], joined, plaque])
 
     # 12. text on the bottom -------------------------------------------------------------------------------------------------
     bounds = outer.bounds
-    tiles_n = p.tiles_x * p.tiles_y
+    # framed panels (a diptych, a grid of pictures) are cut like tiles, each then gets a frame of its own
+    tiles_x, tiles_y = (p.panels_x, p.panels_y) if panels_n > 1 else (p.tiles_x, p.tiles_y)
+    if panels_n > 1 and p.tiles_x * p.tiles_y > 1:
+        notes.append("Framed panels and print tiles do not mix: the model was cut into the panels only.")
+    tiles_n = tiles_x * tiles_y
     label_lines: list[str] = []
     cx, cy = footprint.centroid.x, footprint.centroid.y
     if p.label_bottom:
         label_lines = [l.strip() for l in (p.label.split("\n") if p.label.strip() else [name or "", format_coord(p.lon, p.lat),
                        f"{nice_scale(p.scale_denominator)} · Z x{p.z_exag:g}"]) if l.strip()]
     if label_lines:
-        tw = (bounds[2] - bounds[0]) / (p.tiles_x if tiles_n > 1 else 1)
-        th = (bounds[3] - bounds[1]) / (p.tiles_y if tiles_n > 1 else 1)
+        tw = (bounds[2] - bounds[0]) / (tiles_x if tiles_n > 1 else 1)
+        th = (bounds[3] - bounds[1]) / (tiles_y if tiles_n > 1 else 1)
         height = max(2.5, min(7.0, min(tw, th) * 0.06))
         cx, cy = footprint.centroid.x, footprint.centroid.y
         if tiles_n > 1:  # on the tile that holds the centre, centred on that tile
-            col = min(p.tiles_x - 1, int((cx - bounds[0]) / tw))
-            row = min(p.tiles_y - 1, int((bounds[3] - cy) / th))
+            col = min(tiles_x - 1, int((cx - bounds[0]) / tw))
+            row = min(tiles_y - 1, int((bounds[3] - cy) / th))
             cx = bounds[0] + (col + 0.5) * tw
             cy = bounds[3] - (row + 0.5) * th
         eng = S.text_engraving(label_lines, height, (cx, cy), LABEL_DEPTH_MM, max_width=min(tw, th) * 0.8)
@@ -927,26 +1393,39 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # 13. tiles and pins -------------------------------------------------------------------------------------------------------
     tiles: list[dict[str, Any]] = []
     pins: list[dict[str, Any]] = []
+    tile_list = None
     if tiles_n > 1:
         clock.step(0.8, "Tiles")
-        if p.pins:
+        tile_list = None
+        if p.tile_cuts == "streets" and panels_n <= 1:           # seams that wander along the streets instead of cutting buildings
+            tile_list = seams_mod.street_tiles(bounds, tiles_x, tiles_y,
+                                               shapely.union_all(np.array(building_shapes, dtype=object)) if building_shapes else None,
+                                               road_shape)
+            seams_used = any(not t["poly"].equals(box(*t["box"])) for t in tile_list)
+            if not seams_used:
+                tile_list = None
+        if p.pins and panels_n <= 1:
             pin_z = max(p.pin_diameter_mm / 2.0 + 0.6, min(base * 0.45, base - p.water_depth_mm - p.pin_diameter_mm / 2.0 - 0.4))
             if pin_z + p.pin_diameter_mm / 2.0 > base - (p.water_depth_mm if p.water else 0) - 0.3:
                 notes.append("The base is too thin for pin holes; they were left out (make the base thicker).")
             else:
-                holes, pins = S.pin_holes(outer, bounds, p.tiles_x, p.tiles_y, diameter=p.pin_diameter_mm, depth=p.pin_depth_mm, z=pin_z)
+                if tile_list is None:
+                    holes, pins = S.pin_holes(outer, bounds, tiles_x, tiles_y, diameter=p.pin_diameter_mm,
+                                              depth=p.pin_depth_mm, z=pin_z)
+                else:
+                    holes, pins = _seam_pins(tile_list, outer, building_shapes, p.pin_diameter_mm, p.pin_depth_mm, pin_z)
                 if not holes.is_empty():
                     parts = {n: S.subtract(m, [holes]) for n, m in parts.items()}
-        for t in S.tile_boxes(bounds, p.tiles_x, p.tiles_y):
+        for t_i, t in enumerate(tile_list or S.tile_boxes(bounds, tiles_x, tiles_y)):
             x0, y0, x1, y1 = t["box"]
-            cutter = S.prism(box(x0, y0, x1, y1), -1.0, solid_top + 10.0)
+            cutter = S.prism(t.get("poly") or box(x0, y0, x1, y1), -1.0, solid_top + 10.0)
             tparts = {n: S.intersect(m, cutter) for n, m in parts.items()}
             tparts = {n: S.clean(m) for n, m in tparts.items()}
             tparts = {n: m for n, m in tparts.items() if not m.is_empty()}
             if not tparts:
                 continue
             if p.tile_labels and "terrain" in tparts:
-                tile_fp = outer.intersection(box(x0, y0, x1, y1))
+                tile_fp = outer.intersection(t.get("poly") or box(x0, y0, x1, y1))
                 if not tile_fp.is_empty:
                     c = tile_fp.representative_point() if not tile_fp.contains(tile_fp.centroid) else tile_fp.centroid
                     off = 0.0 if not label_lines else min(y1 - y0, 40.0) * 0.32
@@ -956,6 +1435,18 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                     tparts["terrain"] = S.subtract(tparts["terrain"], [tag])
                     if SINGLE in tparts:
                         tparts[SINGLE] = S.subtract(tparts[SINGLE], [tag])
+            if panels_n > 1 and frame_mm > 0:
+                pf, pj, pp, _po, drawn = framed(box(x0, y0, x1, y1), "mitre", f"{subtitle} · {t_i + 1}/{panels_n}")
+                plaque_drawn = plaque_drawn or drawn
+                if p.color == "color":
+                    tparts["frame"] = pf
+                    if not pp.is_empty():
+                        tparts["plaque"] = pp
+                    if SINGLE in tparts:
+                        tparts[SINGLE] = S.union([tparts[SINGLE], pj, pp])
+                else:
+                    tparts["terrain"] = S.union([tparts["terrain"], pj, pp])
+                t["panel"] = True
             t["parts"] = tparts
             tiles.append(t)
 
@@ -1001,6 +1492,18 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "trees": n_trees,
         "trees_from_air": seen_from_air if p.trees else False,
         "ground_from_photo": cover is not None,
+        "trees_from": trees_from,
+        "conifers": conifers,
+        "footprints_added": footprints_added,
+        "landcover": landcover_used,
+        "dsm_buildings": dsm_used,
+        "fields": len(field_parcels),
+        "field_rows": rows_shape is not None,
+        "plazas": "plazas" in layers_drawn,
+        "highlight": highlight_kind,
+        "track": track_shape is not None,
+        "plaque": plaque_drawn,
+        "tile_cuts": "streets" if tiles and tile_list is not None else "straight",
         "roofs": roofs,
         "colour_layers": layers_drawn,
         "tiles": [{"id": t["id"], "size_mm": [round(t["box"][2] - t["box"][0], 1), round(t["box"][3] - t["box"][1], 1)]} for t in tiles],
@@ -1014,5 +1517,11 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                   "green": green_mm, "rails": rail_shape, "paths": path_shape, "trees": (P, R) if n_trees else None,
                   "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock"),
                   "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None,
-                  "weirs": shapely.union_all(np.array(weir_shapes, dtype=object)) if weir_shapes else None}
-    return BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)
+                  "weirs": shapely.union_all(np.array(weir_shapes, dtype=object)) if weir_shapes else None,
+                  "plazas": zone_shapes.get("plazas"), "fields": zone_shapes.get("fields"), "track": track_shape}
+    result = BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)
+    try:
+        stats["printability"] = printability.analyse(result, nozzle_mm=p.nozzle_mm)
+    except Exception as exc:  # noqa: BLE001 - a report never breaks a model
+        notes.append(f"The printability report failed ({exc}).")
+    return result

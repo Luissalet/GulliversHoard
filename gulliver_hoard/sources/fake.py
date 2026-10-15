@@ -158,6 +158,15 @@ def town(proj: Projector) -> dict[str, Any]:
     way(rect(-609, 150, 12, 12), {"building:part": "yes", "height": "30"}, closed=True)
     way(rect(-609, 150, 12, 12), {"building:part": "yes", "min_height": "30", "height": "44", "roof:shape": "pyramidal"}, closed=True)
     way(rect(-620, 230, 18, 12), {"building": "house", "roof:shape": "hipped", "roof:levels": "1", "building:levels": "2"}, closed=True)
+    # farmland in the south-east: one big mapped farm cut by tracks and a hedge, a vineyard and a meadow
+    way(rect(1000, -520, 300, 640), {"landuse": "farmland"}, closed=True)
+    way([(850, -400), (1150, -380)], {"highway": "track"})
+    way([(1000, -840), (1010, -400)], {"highway": "track"})
+    way([(850, -650), (1000, -640)], {"barrier": "hedge"})
+    way(rect(1070, -270, 130, 90, 0.1), {"landuse": "vineyard"}, closed=True)
+    way(rect(920, -270, 120, 90), {"landuse": "meadow"}, closed=True)
+    # a square in front of the church
+    way(rect(-560, 210, 60, 40), {"place": "square", "name": "Plaza Demo"}, closed=True)
     # a railway bridge over the river
     way([(600, -900), (800, 0)], {"railway": "rail"})
     way([(800, 0), (836, 162)], {"railway": "rail", "bridge": "yes"})

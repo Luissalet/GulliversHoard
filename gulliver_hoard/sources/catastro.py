@@ -18,6 +18,9 @@ from ..errors import Cancelled, GulliverError
 from .http import Fetcher
 
 WFS = "http://ovc.catastro.meh.es/INSPIRE/wfsBU.aspx"
+WFS_CP = "http://ovc.catastro.meh.es/INSPIRE/wfsCP.aspx"
+PARCEL_CELL_DEG = 0.01        # about 900 m: farm parcels are few and big
+PARCEL_ATTRIBUTION = "Parcelas © Dirección General del Catastro (INSPIRE)"
 ATTRIBUTION = "Edificios © Dirección General del Catastro (INSPIRE)"
 # Where the national cadastre answers: Spain without Navarre and the Basque Country (those give no parts and the model keeps
 # the OpenStreetMap buildings), plus the Balearic and Canary Islands.
@@ -73,6 +76,39 @@ def parse(data: bytes) -> list[dict[str, Any]]:
     return out
 
 
+_PARCEL = "{http://inspire.ec.europa.eu/schemas/cp/4.0}CadastralParcel"
+
+
+def parse_parcels(data: bytes) -> list[dict[str, Any]]:
+    """GML of cadastral parcels -> [{"outer": [(lon, lat)...], "inners": [...], "id": str, "rustic": bool}] (one entry per
+    surface of a multi-surface parcel)."""
+    out = []
+    for _event, el in ET.iterparse(io.BytesIO(data), events=("end",)):
+        if el.tag != _PARCEL:
+            continue
+        gid = el.get("{http://www.opengis.net/gml/3.2}id", "")
+        ref = gid.rsplit(".", 1)[-1]
+        rustic = len(ref) >= 6 and ref[5] == "A"
+        for n, surf in enumerate(el.iter("{http://www.opengis.net/gml/3.2}PolygonPatch")):
+            rings = {"outer": None, "inners": []}
+            for wrap, key in ((_EXT, "outer"), (_INT, "inners")):
+                for w in surf.iter(wrap):
+                    pos = w.find(".//" + _POS)
+                    if pos is None or not pos.text:
+                        continue
+                    vals = [float(v) for v in pos.text.split()]
+                    ring = [(vals[i + 1], vals[i]) for i in range(0, len(vals) - 1, 2)]
+                    if len(ring) >= 4:
+                        if key == "outer" and rings["outer"] is None:
+                            rings["outer"] = ring
+                        elif key == "inners":
+                            rings["inners"].append(ring)
+            if rings["outer"] is not None:
+                out.append({"outer": rings["outer"], "inners": rings["inners"], "id": f"{gid}#{n}", "rustic": rustic})
+        el.clear()
+    return out
+
+
 def _cells(bbox: tuple[float, float, float, float], size: float) -> list[tuple[float, float, float, float]]:
     lon0, lat0, lon1, lat1 = bbox
     out = []
@@ -88,20 +124,36 @@ def _cells(bbox: tuple[float, float, float, float], size: float) -> list[tuple[f
     return out
 
 
-def _ask(fetcher: Fetcher, cell: tuple[float, float, float, float]) -> bytes:
+def _ask(fetcher: Fetcher, cell: tuple[float, float, float, float], url: str = WFS, typename: str = "BU.BUILDINGPART") -> bytes:
     lon0, lat0, lon1, lat1 = cell
-    params = {"service": "wfs", "version": "2", "request": "getfeature", "typenames": "BU.BUILDINGPART",
+    params = {"service": "wfs", "version": "2", "request": "getfeature", "typenames": typename,
               "bbox": f"{lat0:.6f},{lon0:.6f},{lat1:.6f},{lon1:.6f}", "srsname": "EPSG::4326"}
-    return fetcher.get(WFS, params=params, bucket="catastro", ext=".gml", max_age_s=120 * 86400,
+    return fetcher.get(url, params=params, bucket="catastro", ext=".gml", max_age_s=120 * 86400,
                        accept=lambda r: b"FeatureCollection" in r.content[:2000] or b"ExceptionReport" in r.content[:2000])
+
+
+def fetch_parcels(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, progress: Optional[Callable[[str], None]] = None,
+                  cancelled: Optional[Callable[[], bool]] = None) -> list[dict[str, Any]]:
+    """Every cadastral parcel in ``bbox``: [{"outer", "inners", "id", "rustic"}] (rustic: a farm parcel, its reference
+    has the polygon letter A)."""
+    return _fetch(fetcher, bbox, progress, cancelled, url=WFS_CP, typename="CP.CADASTRALPARCEL", parser=parse_parcels,
+                  cell_deg=PARCEL_CELL_DEG, what="parcels")
 
 
 def fetch_parts(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, progress: Optional[Callable[[str], None]] = None,
                 cancelled: Optional[Callable[[], bool]] = None, workers: int = 4) -> list[dict[str, Any]]:
     """Every building part in ``bbox`` (lon/lat), each once (parts on a cell edge come in both cells)."""
-    pending = _cells(bbox, CELL_DEG)
+    return _fetch(fetcher, bbox, progress, cancelled, workers=workers)
+
+
+def _fetch(fetcher: Fetcher, bbox: tuple[float, float, float, float], progress: Optional[Callable[[str], None]],
+           cancelled: Optional[Callable[[], bool]], *, workers: int = 4, url: str = WFS, typename: str = "BU.BUILDINGPART",
+           parser: Optional[Callable[[bytes], list[dict[str, Any]]]] = None, cell_deg: float = CELL_DEG,
+           what: str = "building parts") -> list[dict[str, Any]]:
+    parser = parser or parse
+    pending = _cells(bbox, cell_deg)
     if len(pending) > MAX_CELLS:
-        raise GulliverError("too_large", "The area is too big to ask the cadastre for every building.",
+        raise GulliverError("too_large", f"The area is too big to ask the cadastre for every one of its {what}.",
                             "Use OpenStreetMap buildings (buildings_source=osm) for an area this size.")
     seen: dict[str, dict[str, Any]] = {}
     done = 0
@@ -111,10 +163,10 @@ def fetch_parts(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, pr
             if cancelled and cancelled():
                 raise Cancelled()
             batch, pending = pending, []
-            futures = {pool.submit(_ask, fetcher, c): c for c in batch}
+            futures = {pool.submit(_ask, fetcher, c, url, typename): c for c in batch}
             for fut in cf.as_completed(futures):
                 cell = futures[fut]
-                parts = parse(fut.result())
+                parts = parser(fut.result())
                 if len(parts) >= LIMIT and (cell[2] - cell[0]) > 0.0006:
                     mx, my = (cell[0] + cell[2]) / 2, (cell[1] + cell[3]) / 2
                     pending += [(cell[0], cell[1], mx, my), (mx, cell[1], cell[2], my), (cell[0], my, mx, cell[3]),
@@ -125,7 +177,7 @@ def fetch_parts(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, pr
                     seen.setdefault(part["id"] or f"{len(seen)}", part)
                 done += 1
                 if progress and (done % 4 == 0 or done == total):
-                    progress(f"Cadastre: {done}/{total} cells, {len(seen)} building parts")
+                    progress(f"Cadastre: {done}/{total} cells, {len(seen)} {what}")
     return list(seen.values())
 
 
@@ -183,3 +235,23 @@ def merge(osm_buildings: list[Any], cadastre: list[Any]) -> list[Any]:
     hit_in, _hit = tree.query(pts, predicate="within") if pts else (np.array([], dtype=int), None)
     drop = set(int(i) for i in hit_in)
     return special + [b for i, b in enumerate(cadastre) if i not in drop]
+
+
+def to_parcels(items: list[dict[str, Any]], projector: Any) -> list[Any]:
+    """The rustic (farm) parcels as polygons in metres of the area's projection."""
+    import numpy as np
+    from shapely.geometry import Polygon
+
+    out = []
+    for it in items:
+        if not it.get("rustic"):
+            continue
+        rings = []
+        for ring in [it["outer"]] + list(it.get("inners") or []):
+            r = np.asarray(ring, dtype=float)
+            x, y = projector.fwd(r[:, 0], r[:, 1])
+            rings.append(np.column_stack([x, y]))
+        poly = Polygon(rings[0], rings[1:]).buffer(0)
+        if not poly.is_empty and poly.area >= 100.0:
+            out.append(poly)
+    return out

@@ -3,10 +3,11 @@ import { api, fileUrl } from "../api.js";
 import { useApp } from "../context.js";
 import { Bar, Busy, ErrorBox, Icon, ICONS, Modal, Rel, useBusy, useLoad, useStored } from "../components/ui.jsx";
 import Viewer3D from "../components/Viewer3D.jsx";
+import ProductShot, { shotText } from "../components/ProductShot.jsx";
 import { StatusChip, stepLabel } from "./Biblioteca.jsx";
 import { bytes, num } from "../format.js";
 
-const PART_ORDER = ["terrain", "buildings", "water", "roads", "rails", "green", "trees", "rock", "snow", "frame"];
+const PART_ORDER = ["terrain", "buildings", "water", "roads", "rails", "plazas", "fields", "green", "trees", "rock", "snow", "frame", "plaque", "track", "highlight"];
 
 export default function Maqueta({ param }) {
   const { t, lang, version, notify, confirm, changed } = useApp();
@@ -15,6 +16,7 @@ export default function Maqueta({ param }) {
   const [hidden, setHidden] = useState(() => new Set());
   const [explode, setExplode] = useState(0);
   const [view, setView] = useState("iso");
+  const viewerRef = useRef(null);
   const [busy, run] = useBusy();
   const [exportOpen, setExportOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -37,6 +39,7 @@ export default function Maqueta({ param }) {
   const report = m?.report;
   const build = m?.build?.id;
   const glb = report && build ? fileUrl(m.id, "preview.glb", { build }) : null;
+  const panels = (report?.tiles || []).some((x) => x.panel);
   const parts = useMemo(() => PART_ORDER.filter((p) => report?.parts?.[p]), [report]);
 
   if (error) return <div className="p-6"><ErrorBox error={error} onRetry={reload} /></div>;
@@ -60,8 +63,8 @@ export default function Maqueta({ param }) {
     <div className="model-layout">
       <div className="model-view">
         {glb ? (
-          <Viewer3D url={glb} hidden={hidden} explode={explode} view={view}
-            labels={{ viewer: t("viewer_label", { name: m.name }), loading: t("loading_3d"), error: t("viewer_error") }} />
+          <Viewer3D ref={viewerRef} url={glb} hidden={hidden} explode={explode} view={view}
+            labels={{ viewer: t("viewer_label", { name: m.name }), loading: t("loading_3d"), error: t("viewer_error"), capturing: shotText(lang, "capturing") }} />
         ) : (
           <div className="viewer viewer-empty">
             {active ? <><span className="spinner" /> {t("building")}</> : <span className="help">{m.status === "failed" ? t("build_failed") : t("not_built")}</span>}
@@ -72,6 +75,7 @@ export default function Maqueta({ param }) {
             <div className="seg" role="group" aria-label={t("camera")}>
               {["iso", "top", "front"].map((v) => <button key={v} type="button" aria-pressed={view === v} onClick={() => setView(v)}>{t(`view_${v}`)}</button>)}
             </div>
+            <ProductShot viewerRef={viewerRef} modelId={m.id} modelName={m.name} />
             <div className="part-toggles" role="group" aria-label={t("parts")}>
               {parts.map((p) => (
                 <button key={p} type="button" className="part-toggle" aria-pressed={!hidden.has(p)} onClick={() => toggle(p)}>
@@ -135,18 +139,21 @@ export default function Maqueta({ param }) {
             {!report.fits_bed && !(report.tiles || []).length && <div className="banner banner-warn">{t("too_big_for_bed", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
             {(report.tiles || []).some((x) => !x.fits_bed) && <div className="banner banner-warn">{t("tiles_too_big", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
 
+            <Printability data={report.printability || report.stats?.printability} />
+            <Carries report={report} />
+
             <section className="space-y-2">
               <h2>{t("downloads")}</h2>
               <div className="dl-list">
                 <a className="dl" href={fileUrl(m.id, report.files["3mf"], { download: true })}><Icon d={ICONS.download} size={15} /><span><b>3MF</b> {t("dl_3mf")}</span><small>{bytes(report.bytes?.["3mf"], lang)}</small></a>
                 <a className="dl" href={fileUrl(m.id, report.files.stl, { download: true })}><Icon d={ICONS.download} size={15} /><span><b>STL</b> {t("dl_stl")}</span><small>{bytes(report.bytes?.stl, lang)}</small></a>
-                {report.files.tiles_zip && <a className="dl" href={fileUrl(m.id, report.files.tiles_zip, { download: true })}><Icon d={ICONS.download} size={15} /><span><b>ZIP</b> {t("dl_tiles", { n: report.tiles.length })}</span><small>{bytes(report.bytes?.tiles_zip, lang)}</small></a>}
+                {report.files.tiles_zip && <a className="dl" href={fileUrl(m.id, report.files.tiles_zip, { download: true })}><Icon d={ICONS.download} size={15} /><span><b>ZIP</b> {t(panels ? "dl_panels" : "dl_tiles", { n: report.tiles.length })}</span><small>{bytes(report.bytes?.tiles_zip, lang)}</small></a>}
               </div>
               {(report.tiles || []).length > 0 && (
                 <details className="tiles-list">
-                  <summary>{t("tiles_detail", { n: report.tiles.length })}</summary>
+                  <summary>{t(panels ? "tiles_detail_panels" : "tiles_detail", { n: report.tiles.length })}</summary>
                   <table className="tbl">
-                    <thead><tr><th>{t("tile")}</th><th className="r">mm</th><th>{t("bed")}</th><th>{t("files")}</th></tr></thead>
+                    <thead><tr><th>{t(panels ? "panel" : "tile")}</th><th className="r">mm</th><th>{t("bed")}</th><th>{t("files")}</th></tr></thead>
                     <tbody>
                       {report.tiles.map((tile) => (
                         <tr key={tile.id}>
@@ -195,6 +202,70 @@ export default function Maqueta({ param }) {
       {exportOpen && <ExportDialog model={m} onClose={() => setExportOpen(false)} />}
       {renameOpen && <RenameDialog model={m} onClose={() => setRenameOpen(false)} onDone={reload} />}
     </div>
+  );
+}
+
+const VERDICT_CHIP = { ok: "chip-ok", review: "chip-amber", risky: "chip-danger" };
+const pct1 = (v, lang) => `${num(v, 1, lang)} %`;
+
+function Printability({ data }) {
+  const { t, lang } = useApp();
+  if (!data || typeof data.score !== "number") return null;
+  const verdict = VERDICT_CHIP[data.verdict] ? data.verdict : "review";
+  const layers = data.layers || {};
+  const rows = [
+    ...["roads", "rails", "paths", "green"].filter((k) => layers[k]).map((k) => [t(`pr_${k}`), pct1(layers[k].thin_pct ?? 0, lang)]),
+    ...(data.buildings ? [[t("pr_thin_walls"), num(data.buildings.thin_walls ?? 0, 0, lang)]] : []),
+    ...(data.trees ? [[t("pr_thin_crowns"), num(data.trees.thin_crowns ?? 0, 0, lang)]] : []),
+    [t("pr_tiny"), num(data.tiny_bodies ?? 0, 0, lang)],
+  ];
+  return (
+    <section className="panel space-y-2" aria-label={t("printability")}>
+      <div className="flex items-center gap-2">
+        <h2 className="flex-1">{t("printability")}</h2>
+        <span className="num"><b>{t("printability_score", { n: Math.round(data.score) })}</b></span>
+        <span className={`chip ${VERDICT_CHIP[verdict]}`}>{t(`printability_${verdict}`)}</span>
+      </div>
+      <Bar value={data.score / 100} alarm={false} />
+      {(data.advice || []).length > 0 && (
+        <ul className="help space-y-1">
+          {data.advice.map((a, i) => <li key={i}>• {a}</li>)}
+        </ul>
+      )}
+      <details>
+        <summary className="help">{t("printability_details")}{data.nozzle_mm ? ` · ${t("pr_nozzle", { n: num(data.nozzle_mm, 2, lang) })}` : ""}</summary>
+        <table className="tbl">
+          <tbody>{rows.map(([label, value]) => <tr key={label}><td>{label}</td><td className="r num">{value}</td></tr>)}</tbody>
+        </table>
+      </details>
+    </section>
+  );
+}
+
+// What the build used and drew beyond the basics (each line only when the report has it).
+function Carries({ report }) {
+  const { t, lang } = useApp();
+  const word = (prefix, v) => (t.has(`${prefix}_${v}`) ? t(`${prefix}_${v}`) : v);
+  const list = (arr) => (Array.isArray(arr) ? arr : []);
+  const lines = [];
+  if (list(report.trees_from).length) lines.push(t("st_trees_from", { v: list(report.trees_from).map((v) => word("src", v)).join(", ") }));
+  if (report.conifers > 0) lines.push(t("st_conifers", { n: num(report.conifers, 0, lang) }));
+  if (report.footprints_added > 0) lines.push(t("st_footprints_added", { n: num(report.footprints_added, 0, lang) }));
+  if (list(report.landcover).length) lines.push(t("st_landcover", { v: list(report.landcover).map((v) => word("lc", v)).join(", ") }));
+  if (report.dsm_buildings > 0) lines.push(t("st_dsm", { n: num(report.dsm_buildings, 0, lang) }));
+  if (report.fields > 0) lines.push(t("st_fields", { n: num(report.fields, 0, lang) }));
+  if (report.field_rows) lines.push(t("st_field_rows"));
+  if (report.plazas) lines.push(t("st_plazas"));
+  if (report.highlight) lines.push(t.has(`st_highlight_${report.highlight}`) ? t(`st_highlight_${report.highlight}`) : t("st_highlight_marker"));
+  if (report.track) lines.push(t("st_track"));
+  if (report.plaque) lines.push(t("st_plaque"));
+  if (report.tile_cuts === "streets") lines.push(t("st_tile_cuts"));
+  if (!lines.length) return null;
+  return (
+    <section className="space-y-1">
+      <h2>{t("carries")}</h2>
+      <div className="help space-y-1">{lines.map((l, i) => <div key={i}>• {l}</div>)}</div>
+    </section>
   );
 }
 

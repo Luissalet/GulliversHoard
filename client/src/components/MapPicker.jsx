@@ -18,11 +18,14 @@ function handleIcon(cls, label) {
  * The area picker. `value` = {lon, lat, width_m, height_m, shape, tiles_x, tiles_y}; `onChange(patch)` gets new centre / size.
  * Drag the centre handle to move, the corner handle to resize, click the map to recentre. `flyTo` = [w, s, e, n] fits the view.
  */
-export default function MapPicker({ value, onChange, flyTo, base = "osm", labels, readOnly = false }) {
+export default function MapPicker({ value, onChange, flyTo, base = "osm", labels, readOnly = false, pickMode = false, onPick, highlight = null, route = null }) {
   const holder = useRef(null);
   const state = useRef({});
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  // a one-shot click to place something (the highlighted place) instead of recentring the area
+  const pickRef = useRef({ armed: pickMode, onPick });
+  pickRef.current = { armed: pickMode, onPick };
 
   // create the map once
   useEffect(() => {
@@ -36,7 +39,10 @@ export default function MapPicker({ value, onChange, flyTo, base = "osm", labels
     const grid = L.layerGroup().addTo(map);
     const centre = L.marker([value.lat, value.lon], { draggable: !readOnly, icon: handleIcon("gm-centre"), keyboard: true, title: labels?.move || "" }).addTo(map);
     const corner = L.marker([value.lat, value.lon], { draggable: !readOnly, icon: handleIcon("gm-corner"), keyboard: true, title: labels?.resize || "" }).addTo(map);
-    state.current = { map, outline, outlineTop, shade, frame, grid, centre, corner, value, tile: null };
+    const routeLayer = L.layerGroup().addTo(map);
+    const mark = L.marker([value.lat, value.lon], { icon: L.divIcon({ className: "gm-handle gm-highlight", iconSize: [20, 20], iconAnchor: [10, 10], html: "<span></span>" }),
+      interactive: false, keyboard: false, zIndexOffset: 500 });
+    state.current = { map, outline, outlineTop, shade, frame, grid, centre, corner, value, tile: null, routeLayer, mark };
 
     centre.on("drag", (e) => {
       const { lat, lng } = e.target.getLatLng();
@@ -64,6 +70,10 @@ export default function MapPicker({ value, onChange, flyTo, base = "osm", labels
     corner.on("dragend", (e) => resize(e, true));
     map.on("click", (e) => {
       if (readOnly) return;
+      if (pickRef.current.armed) {
+        pickRef.current.onPick?.({ lon: round(e.latlng.lng), lat: round(e.latlng.lat) });
+        return;
+      }
       onChangeRef.current({ lon: round(e.latlng.lng), lat: round(e.latlng.lat) });
     });
     const observer = new ResizeObserver(() => map.invalidateSize());
@@ -82,6 +92,34 @@ export default function MapPicker({ value, onChange, flyTo, base = "osm", labels
     layer.bringToBack();
     return () => { map.removeLayer(layer); };
   }, [base]);
+
+  // the highlighted place (gold marker)
+  useEffect(() => {
+    const { map, mark } = state.current;
+    if (!map || !mark) return;
+    if (highlight && Number.isFinite(highlight.lon) && Number.isFinite(highlight.lat)) {
+      mark.setLatLng([highlight.lat, highlight.lon]);
+      if (!map.hasLayer(mark)) mark.addTo(map);
+    } else if (map.hasLayer(mark)) {
+      map.removeLayer(mark);
+    }
+  }, [highlight?.lon, highlight?.lat]);
+
+  // the route, drawn as a line (already thinned by the caller)
+  useEffect(() => {
+    const { routeLayer } = state.current;
+    if (!routeLayer) return;
+    routeLayer.clearLayers();
+    for (const line of route || []) {
+      if (line.length < 2) continue;
+      L.polyline(line.map(([lon, lat]) => [lat, lon]), { color: "#d2462d", weight: 3.5, opacity: 0.9, interactive: false }).addTo(routeLayer);
+    }
+  }, [route]);
+
+  // crosshair while a click is armed
+  useEffect(() => {
+    holder.current?.classList.toggle("gm-picking", !!pickMode);
+  }, [pickMode]);
 
   // follow the value
   useEffect(() => {

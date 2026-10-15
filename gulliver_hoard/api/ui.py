@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..agent_tools import TOOLS_BY_NAME, tool_catalog
 from ..errors import GulliverError
+from .. import media
 from ..hoard_link import family
 from .deps import services, tool
 
@@ -67,6 +68,41 @@ def model_file(request: Request, model_id: str, name: str, download: bool = Fals
     if download:
         headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(path.name)}"
     return FileResponse(path, media_type=ctype, headers=headers)
+
+
+@router.post("/models/{model_id}/media/{kind}")
+async def model_media_upload(request: Request, model_id: str, kind: str):
+    """Store a photo (PNG) or turntable video (WebM) rendered by the viewer; the raw body is the file."""
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > media.MAX_BYTES:
+        raise GulliverError("too_large", "The upload is larger than 60 MB.")
+    chunks, total = [], 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > media.MAX_BYTES:
+            raise GulliverError("too_large", "The upload is larger than 60 MB.")
+        chunks.append(chunk)
+    return media.save_media(services(request), model_id, kind, b"".join(chunks), request.headers.get("content-type", ""))
+
+
+@router.get("/models/{model_id}/media")
+def model_media_list(request: Request, model_id: str):
+    """The photo / turntable video stored for the current build of a model."""
+    return media.list_media(services(request), model_id)
+
+
+@router.get("/models/{model_id}/media/{name}")
+def model_media_file(request: Request, model_id: str, name: str, download: bool = False):
+    if name not in media.NAMES:
+        raise GulliverError("not_found", f"No media file {name!r}.")
+    path = services(request).projects.file(model_id, name)
+    headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"}
+    if download:
+        headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(path.name)}"
+    return FileResponse(path, media_type=media.media_type(name), headers=headers)
 
 
 @router.get("/events")

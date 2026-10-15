@@ -51,6 +51,7 @@ ROOF_SHAPES = {"flat", "gabled", "hipped", "pyramidal", "dome", "onion", "cone",
                "half-hipped", "saltbox", "spire"}
 ROCK_TAGS = {"natural": {"bare_rock", "scree", "shingle"}}
 ICE_TAGS = {"natural": {"glacier"}}
+FIELD_TAGS = {"landuse": {"farmland", "meadow", "orchard", "vineyard", "allotments", "plant_nursery"}}
 GREEN_TAGS = {
     "leisure": {"park", "garden", "pitch", "golf_course", "nature_reserve", "playground", "recreation_ground"},
     "landuse": {"forest", "grass", "meadow", "recreation_ground", "village_green", "cemetery", "orchard", "vineyard", "allotments"},
@@ -106,7 +107,13 @@ class Features:
     parks: Any = None             # the part of ``green`` that is a park or garden (scattered trees)
     rock: Any = None              # bare rock, scree, shingle
     ice: Any = None               # glaciers
-    trees: list[tuple[float, float, float, float]] = field(default_factory=list)   # mapped trees: (x, y, height_m, crown_m)
+    trees: list[tuple[float, float, float, float, str]] = field(default_factory=list)   # (x, y, height_m, crown_m, leaf_type)
+    needle_woods: Any = None      # woods mapped as needle-leaved (conifers)
+    plazas: Any = None            # squares and pedestrian areas
+    farmland: list[tuple[Any, str]] = field(default_factory=list)   # (polygon, landuse) one per mapped field or farm
+    hedges: list[Any] = field(default_factory=list)                 # lines
+    crops: Any = None             # cropland seen from space where nothing is mapped (set by the land cover step)
+    parcels: list[Any] = field(default_factory=list)                # cadastral farm parcels (polygons), Spain
     tree_rows: list[Any] = field(default_factory=list)  # lines
     landmarks: list[dict[str, Any]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
@@ -149,7 +156,9 @@ def build_query(bbox: tuple[float, float, float, float], timeout: int = 180) -> 
             'way["waterway"~"^(riverbank|dock)$"];relation["waterway"="riverbank"];'
             'way["landuse"~"^(reservoir|basin)$"];relation["landuse"~"^(reservoir|basin)$"];'
             'way["waterway"~"^(river|stream|canal|drain|ditch|weir|dam)$"];'
-            'way["highway"];'
+            'way["landuse"~"^(farmland|plant_nursery)$"];relation["landuse"="farmland"];way["barrier"="hedge"];'
+            'way["highway"];way["area:highway"];way["place"="square"];'
+            'relation["highway"="pedestrian"];relation["place"="square"];relation["area:highway"];'
             'way["railway"~"^(rail|light_rail|tram|subway|narrow_gauge|monorail|funicular)$"];'
             f"{green}"
             ");out geom;")
@@ -406,8 +415,9 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     proj = _Proj(projector)
     clip = box(-width_m / 2 - pad_m, -height_m / 2 - pad_m, width_m / 2 + pad_m, height_m / 2 + pad_m)
     feats = Features()
-    water_polys, green_polys, wood_polys, park_polys, rock_polys, ice_polys = [], [], [], [], [], []
-    trees: list[tuple[float, float, float, float]] = []
+    water_polys, green_polys, wood_polys, park_polys, rock_polys, ice_polys, needle_polys = [], [], [], [], [], [], []
+    plaza_polys: list[Any] = []
+    trees: list[tuple[float, float, float, float, str]] = []
     seen_building_ways: set[int] = set()
     for el in data.get("elements", []):
         if el.get("type") == "relation":
@@ -435,7 +445,8 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
             if tags.get("natural") == "tree" and "lon" in el and "lat" in el:
                 x, y = projector.fwd(float(el["lon"]), float(el["lat"]))
                 if clip.contains(Point(x, y)):
-                    trees.append((float(x), float(y), _num(tags.get("height")) or 0.0, _num(tags.get("diameter_crown")) or 0.0))
+                    trees.append((float(x), float(y), _num(tags.get("height")) or 0.0, _num(tags.get("diameter_crown")) or 0.0,
+                                  (tags.get("leaf_type") or "").lower()))
             continue
         else:
             continue
@@ -479,6 +490,21 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
                 continue
             feats.waterways.append((line, w, tags["waterway"]))
             continue
+        if kind == "way" and tags.get("barrier") == "hedge":
+            if line is not None:
+                feats.hedges.append(line)
+            if shape is None or not _is_green(tags, FIELD_TAGS):
+                continue
+        if _is_green(tags, FIELD_TAGS) and shape is not None:
+            g = shape.intersection(clip)
+            if not g.is_empty and g.area >= 200.0:
+                feats.farmland.append((g, tags.get("landuse", "farmland")))
+            if tags.get("landuse") in ("farmland", "plant_nursery"):
+                continue
+        if _is_plaza(tags) and shape is not None:
+            plaza_polys.append(shape)
+            if kind == "relation" or "highway" not in tags or tags.get("area") == "yes":
+                continue
         if kind == "way" and "highway" in tags:
             hw = LINK_OF.get(tags["highway"], tags["highway"])
             if hw not in ROAD_WIDTH_M or tags.get("area") == "yes":
@@ -506,6 +532,8 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
             green_polys.append(shape)
             if _is_green(tags, WOOD_TAGS):
                 wood_polys.append(shape)
+                if (tags.get("leaf_type") or "").lower() == "needleleaved":
+                    needle_polys.append(shape)
             elif _is_green(tags, PARK_TAGS):
                 park_polys.append(shape)
 
@@ -513,8 +541,10 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     feats.green = _valid(unary_union(green_polys).intersection(clip)) if green_polys else None
     feats.woods = _valid(unary_union(wood_polys).intersection(clip)) if wood_polys else None
     feats.rock = _valid(unary_union(rock_polys).intersection(clip)) if rock_polys else None
+    feats.needle_woods = _valid(unary_union(needle_polys).intersection(clip)) if needle_polys else None
     feats.ice = _valid(unary_union(ice_polys).intersection(clip)) if ice_polys else None
     feats.parks = _valid(unary_union(park_polys).intersection(clip)) if park_polys else None
+    feats.plazas = _valid(unary_union(plaza_polys).intersection(clip)) if plaza_polys else None
     if feats.water is not None:
         for name in ("green", "woods", "parks"):
             g = getattr(feats, name)
@@ -522,6 +552,7 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
                 setattr(feats, name, _valid(g.difference(feats.water)))
     feats.trees = trees
     feats.tree_rows = [l for l in feats.tree_rows if l.intersects(clip)]
+    feats.hedges = [l for l in feats.hedges if l.intersects(clip)]
     feats.buildings = _drop_outlines_with_parts(feats.buildings)
     feats.roads = [r for r in feats.roads if r.line is not None and r.line.intersects(clip)]
     feats.rails = [r for r in feats.rails if r.line is not None and r.line.intersects(clip)]
@@ -533,6 +564,15 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     feats.landmarks = landmarks
     feats.counts = {"elements": len(data.get("elements", []))}
     return feats
+
+
+def _is_plaza(tags: dict[str, str]) -> bool:
+    """A square or a pedestrian area (drawn as an area, not as a street line)."""
+    if tags.get("place") == "square":
+        return True
+    if tags.get("area:highway") in ("pedestrian", "footway", "living_street"):
+        return True
+    return tags.get("highway") in ("pedestrian", "footway", "living_street") and tags.get("area") == "yes"
 
 
 def _drop_outlines_with_parts(buildings: list[Building]) -> list[Building]:

@@ -18,8 +18,9 @@ GULLIVER_FAKE=1 python -m gulliver_hoard     # the invented town, no network
 - Every solid is a manifold3d `Manifold`. Never let two solids meet on a coincident face in a union or a difference: grow or shrink one of them by a few hundredths of a millimetre (see the frame, buildings, colour layers and banks). Every part, the one-piece twin and every tile must pass the open-edge check of `outputs._check` (tests do this).
 - New layers or parameters go in `ModelParams` (validated, with a description) and in the UI form, the i18n table (castellano de España first, English second) and the README in both languages.
 - Network goes through `sources/http.Fetcher` with its cache. The tests never touch the network: use `FakeSources` or an `httpx.MockTransport`.
+- The gathered map data of an area is cached 7 days (`stages` bucket, key `_stage_key` in `mesh/build.py`): a new parameter that changes what is fetched or how it is merged into `Features` must enter that key (or bump `STAGE_VERSION`); a print-only parameter must not.
 - `hoard_link/` is vendored and byte-identical to upstream HoardLink: never edit it here.
-- No taglines, no names of other products in the interface. Map data must keep its attribution (OpenStreetMap ODbL, IGN CC BY 4.0 for the MDT and the PNOA photo, Catastro, Terrarium).
+- No taglines, no names of other products in the interface. Map data must keep its attribution (OpenStreetMap ODbL, IGN CC BY 4.0 for the MDT and the PNOA photo, Catastro, Terrarium, and for the worldwide fills Microsoft's building footprints, the Meta and World Resources Institute canopy height, ESA WorldCover and the national surface models of `sources/dsm.py`); each source adds its text to the report only when it was used.
 
 ## Before finishing a change
 

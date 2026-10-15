@@ -6,6 +6,7 @@ import { useContextProvider } from "../components/hooks.js";
 import MapPicker from "../components/MapPicker.jsx";
 import { sizeOfBox } from "../geo.js";
 import { num } from "../format.js";
+import { MAX_TRACK_BYTES, frameBox, summariseTrack } from "../track.js";
 
 const START = { lon: -3.7038, lat: 40.4168, width_m: 2000, height_m: 2000 };
 const SHAPES = ["rect", "rounded", "circle", "hexagon"];
@@ -60,6 +61,8 @@ export default function Nueva({ query }) {
   const [flyTo, setFlyTo] = useState(null);
   const [layer, setLayer] = useStored("gulliver.layer", "osm");
   const [last, setLast] = useStored("gulliver.lastArea", START);
+  const [picking, setPicking] = useState(false);
+  const [trackName, setTrackName] = useState("");
   const [busy, run] = useBusy();
   const checkSeq = useRef(0);
 
@@ -93,6 +96,8 @@ export default function Nueva({ query }) {
   }, [editId]);
 
   const set = useCallback((patch) => setForm((f) => ({ ...f, ...patch })), []);
+  // the route in the form, read once per change for the map and for framing (the server does the real parsing)
+  const trackInfo = useMemo(() => (form?.track ? summariseTrack(form.track) : null), [form?.track]);
 
   // what the build would be (debounced)
   useEffect(() => {
@@ -100,7 +105,7 @@ export default function Nueva({ query }) {
     const mine = ++checkSeq.current;
     const timer = setTimeout(async () => {
       try {
-        const r = await api.call("area_check", { params: clean(form) });
+        const r = await api.call("area_check", { params: clean(form, { skipTrack: true }) });
         if (mine === checkSeq.current) { setCheck(r); setCheckError(null); }
       } catch (e) {
         if (mine === checkSeq.current) setCheckError(e);
@@ -112,7 +117,7 @@ export default function Nueva({ query }) {
 
   const dirty = useMemo(() => !!form && !!base && JSON.stringify(form) !== JSON.stringify(base), [form, base]);
   useContextProvider(() => form && ({ kind: editId ? "model-params-form" : "new-model-form", object_id: editId || "new", dirty: dirty || !!name,
-    fields: { name, place, preset, ...clean(form) } }));
+    fields: { name, place, preset, ...clean(form, { skipTrack: true }), track_loaded: !!form.track } }));
 
   const doSearch = async (e) => {
     e?.preventDefault();
@@ -147,19 +152,42 @@ export default function Nueva({ query }) {
   };
 
   const countFeatures = async () => {
-    const r = await run("features", () => api.call("area_check", { params: clean(form), fetch_features: true }));
+    const r = await run("features", () => api.call("area_check", { params: clean(form, { skipTrack: true }), fetch_features: true }));
     if (r) setFeatures(r.features || null);
   };
 
   const submit = async () => {
     setLast({ lon: form.lon, lat: form.lat, width_m: form.width_m, height_m: form.height_m });
     if (editId) {
-      const r = await run("save", () => api.call("model_update", { model_id: editId, name, place, params: clean(form), build: true }));
+      const r = await run("save", () => api.call("model_update", { model_id: editId, name, place, params: clean(form, { sendEmptyTrack: true }), build: true }));
       if (r) { notify(t("rebuilding")); window.location.hash = `#/m/${editId}`; }
     } else {
-      const r = await run("save", () => api.call("model_create", { name, place, preset: preset || undefined, params: clean(form), build: true }));
+      const r = await run("save", () => api.call("model_create", { name, place, preset: preset || undefined, params: clean(form, { sendEmptyTrack: true }), build: true }));
       if (r) { notify(t("building_started")); window.location.hash = `#/m/${r.id}`; }
     }
+  };
+
+  const pickHighlight = ({ lon, lat }) => { set({ highlight_lon: lon, highlight_lat: lat }); setPicking(false); };
+  const clearHighlight = () => { set({ highlight_lon: null, highlight_lat: null }); setPicking(false); };
+  const hasHighlight = Number.isFinite(form?.highlight_lon) && Number.isFinite(form?.highlight_lat);
+  const loadTrack = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > MAX_TRACK_BYTES) { notify(t("track_too_big"), "error"); return; }
+    let text = "";
+    try { text = await file.text(); } catch { notify(t("track_unreadable"), "error"); return; }
+    if (text.length > MAX_TRACK_BYTES) { notify(t("track_too_big"), "error"); return; }
+    if (!summariseTrack(text)) { notify(t("track_unreadable"), "error"); return; }
+    set({ track: text });
+    setTrackName(file.name);
+  };
+  const clearTrack = () => { set({ track: "" }); setTrackName(""); };
+  const frameTrack = () => {
+    if (!trackInfo) return;
+    const box = frameBox(trackInfo.bbox, form.shape);
+    set(box);
+    setFlyTo(boxAround(box));
   };
 
   if (!form) return <div className="p-6"><span className="spinner" /> {t("loading")}</div>;
@@ -190,9 +218,10 @@ export default function Nueva({ query }) {
         <button type="button" className="btn btn-sm btn-icon map-fit" onClick={() => setFlyTo(boxAround(form))} aria-label={t("map_fit")} title={t("map_fit")}>
           <Icon d={ICONS.target} size={15} />
         </button>
-        <MapPicker value={form} base={layer} flyTo={flyTo} onChange={set}
+        <MapPicker value={form} base={layer} flyTo={flyTo} onChange={set} pickMode={picking} onPick={pickHighlight}
+          highlight={hasHighlight ? { lon: form.highlight_lon, lat: form.highlight_lat } : null} route={trackInfo?.draw || null}
           labels={{ map: t("map_label"), move: t("map_move"), resize: t("map_resize") }} />
-        <div className="map-hint help">{t("map_hint")}</div>
+        <div className="map-hint help">{picking ? t("pick_hint") : t("map_hint")}</div>
       </div>
 
       <div className="new-panel">
@@ -287,6 +316,16 @@ export default function Nueva({ query }) {
           <Toggle label={t("l_zones")} checked={form.zones} onChange={(v) => set({ zones: v })} hint={t("l_zones_help")} />
           {form.zones && <Toggle label={t("l_ground_photo")} checked={form.ground_from_photo} onChange={(v) => set({ ground_from_photo: v })} hint={t("l_ground_photo_help")} />}
           <Toggle label={t("l_meadows")} checked={form.meadows} onChange={(v) => set({ meadows: v })} hint={t("l_meadows_help")} />
+          <Toggle label={t("l_plazas")} checked={form.plazas} onChange={(v) => set({ plazas: v })} hint={t("l_plazas_help")} />
+          <Toggle label={t("l_dsm")} checked={form.dsm_heights} onChange={(v) => set({ dsm_heights: v })} hint={t("l_dsm_help")} />
+          <Toggle label={t("l_landcover")} checked={form.landcover} onChange={(v) => set({ landcover: v })} hint={t("l_landcover_help")} />
+          <Toggle label={t("l_fields")} checked={form.fields} onChange={(v) => set({ fields: v })} hint={t("l_fields_help")} />
+          {form.fields && <Toggle label={t("l_field_rows")} checked={form.field_rows} onChange={(v) => set({ field_rows: v })} hint={t("l_field_rows_help")} />}
+          {form.fields && form.field_rows && (
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField id="f-rowsp" label={t("row_spacing")} unit="mm" step={0.1} min={0.8} max={5} value={form.row_spacing_mm} onChange={(v) => set({ row_spacing_mm: v })} />
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="label">{t("roofs")}</span>
@@ -325,6 +364,62 @@ export default function Nueva({ query }) {
               <input className="field" value={form.label} maxLength={80} onChange={(e) => set({ label: e.target.value })} placeholder={t("label_placeholder")} />
             </label>
           )}
+          <label className="block">
+            <span className="label">{t("frame_style")}</span>
+            <select className="field" value={form.frame_style} onChange={(e) => set({ frame_style: e.target.value })}>
+              {["flat", "bevel", "step"].map((k) => <option key={k} value={k}>{t(`frame_style_${k}`)}</option>)}
+            </select>
+          </label>
+          <Toggle label={t("plaque")} checked={form.plaque} onChange={(v) => set({ plaque: v })} hint={t("plaque_help")} />
+          {form.plaque && (
+            <label className="block">
+              <span className="label">{t("plaque_text")}</span>
+              <input className="field" value={form.plaque_text} maxLength={60} onChange={(e) => set({ plaque_text: e.target.value })} placeholder={t("plaque_placeholder")} />
+            </label>
+          )}
+          <div>
+            <span className="label">{t("panels")}</span>
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField id="f-px" label={t("panels_x")} step={1} min={1} max={6} value={form.panels_x} onChange={(v) => set({ panels_x: v })} />
+              <NumberField id="f-py" label={t("panels_y")} step={1} min={1} max={6} value={form.panels_y} onChange={(v) => set({ panels_y: v })} />
+            </div>
+            <span className="help mt-1 block">{t("panels_help")}</span>
+            {form.panels_x * form.panels_y > 1 && !(form.frame_mm > 0) && <div className="banner banner-warn mt-2">{t("panels_need_frame")}</div>}
+          </div>
+          <Toggle label={t("thicken")} checked={form.thicken} onChange={(v) => set({ thicken: v })} hint={t("thicken_help")} />
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField id="f-nozzle" label={t("nozzle")} unit="mm" step={0.05} min={0.1} max={1.2} value={form.nozzle_mm} onChange={(v) => set({ nozzle_mm: v })} hint={t("nozzle_help")} />
+          </div>
+        </Group>
+
+        <Group title={t("g_personal")} icon={ICONS.star} open={hasHighlight || !!form.track}>
+          <div className="space-y-2">
+            <span className="label">{t("highlight")}</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" className="btn btn-sm" aria-pressed={picking} onClick={() => setPicking(!picking)}>
+                <Icon d={ICONS.target} size={13} /> {picking ? t("highlight_cancel") : t("highlight_set")}
+              </button>
+              {hasHighlight && <button type="button" className="btn btn-sm" onClick={clearHighlight}><Icon d={ICONS.close} size={13} /> {t("highlight_remove")}</button>}
+            </div>
+            <div className="help">{hasHighlight ? t("highlight_at", { lat: num(form.highlight_lat, 5, lang), lon: num(form.highlight_lon, 5, lang) }) : t("highlight_help")}</div>
+          </div>
+          <div className="space-y-2">
+            <span className="label">{t("route")}</span>
+            <input type="file" className="field" accept=".gpx,.kml,.geojson,.json" onChange={loadTrack} aria-label={t("route")} />
+            {form.track ? (
+              <>
+                <div className="help">{t("track_loaded", { name: trackName || t("track_file"), pts: trackInfo ? num(trackInfo.points, 0, lang) : "?", n: trackInfo ? trackInfo.lines : "?" })}</div>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="btn btn-sm" onClick={frameTrack} disabled={!trackInfo}><Icon d={ICONS.target} size={13} /> {t("track_frame")}</button>
+                  <button type="button" className="btn btn-sm" onClick={clearTrack}><Icon d={ICONS.close} size={13} /> {t("track_remove")}</button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <NumberField id="f-tw" label={t("track_width")} unit="mm" step={0.1} min={0.4} max={5} value={form.track_width_mm} onChange={(v) => set({ track_width_mm: v })} />
+                  <NumberField id="f-th" label={t("track_height")} unit="mm" step={0.1} min={0.2} max={4} value={form.track_height_mm} onChange={(v) => set({ track_height_mm: v })} />
+                </div>
+              </>
+            ) : <div className="help">{t("track_help")}</div>}
+          </div>
         </Group>
 
         <Group title={t("g_tiles")} icon={ICONS.grid} open={form.tiles_x * form.tiles_y > 1}>
@@ -332,6 +427,15 @@ export default function Nueva({ query }) {
             <NumberField id="f-tx" label={t("tiles_x")} step={1} min={1} max={12} value={form.tiles_x} onChange={(v) => set({ tiles_x: v })} />
             <NumberField id="f-ty" label={t("tiles_y")} step={1} min={1} max={12} value={form.tiles_y} onChange={(v) => set({ tiles_y: v })} />
           </div>
+          {form.tiles_x * form.tiles_y > 1 && (
+            <label className="block">
+              <span className="label">{t("tile_cuts")}</span>
+              <select className="field" value={form.tile_cuts} onChange={(e) => set({ tile_cuts: e.target.value })}>
+                {["straight", "streets"].map((k) => <option key={k} value={k}>{t(`tile_cuts_${k}`)}</option>)}
+              </select>
+              <span className="help mt-1 block">{t("tile_cuts_help")}</span>
+            </label>
+          )}
           <Toggle label={t("pins")} checked={form.pins} onChange={(v) => set({ pins: v })} hint={t("pins_help")} />
           <Toggle label={t("tile_labels")} checked={form.tile_labels} onChange={(v) => set({ tile_labels: v })} />
         </Group>
@@ -381,9 +485,15 @@ function Summary({ check, error, features, form, busy, onCount, onTiles, warning
   );
 }
 
-function clean(form) {
+// What goes to the server: empty values are left out, except an empty route when saving (so a removed route is removed);
+// the route text itself stays out of the live check, which only needs the area.
+function clean(form, { skipTrack = false, sendEmptyTrack = false } = {}) {
   const out = {};
   for (const [k, v] of Object.entries(form)) {
+    if (k === "track") {
+      if (skipTrack) continue;
+      if (v === "" && sendEmptyTrack) { out[k] = ""; continue; }
+    }
     if (v === "" || v === null || v === undefined || Number.isNaN(v)) continue;
     out[k] = v;
   }

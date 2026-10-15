@@ -153,35 +153,52 @@ def along(lines: Iterable[Any], spacing: float) -> np.ndarray:
 
 
 def trees_solid(points: np.ndarray, radii: np.ndarray, ground: Callable[[np.ndarray, np.ndarray], np.ndarray],
-                sink: float = 0.3, segments: int = 10) -> Manifold:
-    """A rounded crown per point (radius ``radii``), standing on the ground with its foot ``sink`` mm under it."""
+                sink: float = 0.3, segments: int = 10, heights: Optional[np.ndarray] = None,
+                kinds: Optional[np.ndarray] = None) -> Manifold:
+    """A tree per point standing on the ground with its foot ``sink`` mm under it: a rounded crown for a broad-leaved tree,
+    a cone for a conifer (``kinds`` 1). ``heights`` (mm, 0 = from the crown) sets how tall it stands."""
     if not len(points):
         return S.EMPTY
     z = ground(points[:, 0], points[:, 1])
-    unit = Manifold.sphere(1.0, segments)
+    heights = np.zeros(len(points)) if heights is None else np.asarray(heights, dtype=float)
+    kinds = np.zeros(len(points), dtype=int) if kinds is None else np.asarray(kinds, dtype=int)
+    ball = Manifold.sphere(1.0, segments)
+    cone = Manifold.cylinder(1.0, 1.0, 0.0, 8)
     crowns = []
-    for (x, y), r, g in zip(points, radii, z):
-        hz = r * 0.9
-        crowns.append(unit.scale((r, r, hz)).translate((float(x), float(y), float(g) + hz - min(sink, hz * 0.6))))
+    for (x, y), r, g, hm, kd in zip(points, radii, z, heights, kinds):
+        if kd == 1:
+            hc = float(np.clip(hm, 1.8 * r, 3.6 * r)) if hm > 0 else 2.4 * r
+            foot = min(sink, hc * 0.3)
+            crowns.append(cone.scale((r, r, hc + foot)).translate((float(x), float(y), float(g) - foot)))
+        else:
+            hz = float(np.clip(hm * 0.5, 0.7 * r, 1.5 * r)) if hm > 0 else r * 0.9
+            crowns.append(ball.scale((r, r, hz)).translate((float(x), float(y), float(g) + hz - min(sink, hz * 0.6))))
     return S.union(crowns)
 
 
-def plant(*, woods: Any, parks: Any, mapped: list[tuple[float, float, float]], rows: list[Any], blocked: Any, inside: Any,
+def plant(*, woods: Any, parks: Any, mapped: list[tuple], rows: list[Any], blocked: Any, inside: Any,
           crown_mm: float, density: float, rng: np.random.Generator, blocked_light: Any = None,
-          scatter_parks: bool = True, scatter_woods: bool = True) -> tuple[np.ndarray, np.ndarray]:
-    """Where the trees go and how big they are: trees known one by one (mapped, or seen on the aerial photo, with their own
-    crowns) and rows of trees, then woods filled densely and parks scattered. Everything stays ``inside`` (the model, a crown
-    in from its edge); scattered trees keep off ``blocked`` (roads, paths, buildings, water), known ones only off
-    ``blocked_light`` (buildings, water: a street tree may lean over the road)."""
-    known_p, known_r, fill_p, fill_r = [], [], [], []
+          scatter_parks: bool = True, scatter_woods: bool = True, conifer_woods: Any = None,
+          conifer_share: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Where the trees go, how big and tall they are and which kind: trees known one by one (mapped, from the canopy map,
+    seen on the aerial photo: ``(x, y, crown_mm[, height_mm[, kind]])``) and rows of trees, then woods filled densely and
+    parks scattered. Everything stays ``inside`` (the model, a crown in from its edge); scattered trees keep off
+    ``blocked`` (roads, paths, buildings, water), known ones only off ``blocked_light`` (buildings, water: a street tree may
+    lean over the road). Scattered trees in ``conifer_woods`` are conifers, elsewhere a ``conifer_share`` of them."""
+    known_p, known_r, known_h, known_k = [], [], [], []
+    fill_p, fill_r = [], []
     if mapped:
-        m = np.asarray(mapped, dtype=float)
-        known_p.append(m[:, :2])
-        known_r.append(np.maximum(m[:, 2], crown_mm) / 2.0)
+        for m in mapped:
+            known_p.append((m[0], m[1]))
+            known_r.append(max(m[2], crown_mm) / 2.0)
+            known_h.append(m[3] if len(m) > 3 else 0.0)
+            known_k.append(m[4] if len(m) > 4 else -1)
     if rows:
         r = along(rows, crown_mm * 0.9)
-        known_p.append(r)
-        known_r.append(np.full(len(r), crown_mm / 2.0))
+        known_p.extend(map(tuple, r))
+        known_r.extend([crown_mm / 2.0] * len(r))
+        known_h.extend([0.0] * len(r))
+        known_k.extend([0] * len(r))
     if density > 0:
         spacing = crown_mm * 0.82 / math.sqrt(density)
         expected = (woods.area if woods is not None and scatter_woods else 0.0) / (spacing * spacing * 0.866)
@@ -196,31 +213,72 @@ def plant(*, woods: Any, parks: Any, mapped: list[tuple[float, float, float]], r
             pk = scatter(parks, spacing * 1.6, rng, keep=0.4)
             fill_p.append(pk)
             fill_r.append(crown_mm / 2.0 * rng.uniform(0.9, 1.3, len(pk)))
+    KP = np.asarray(known_p, dtype=float).reshape(-1, 2)
+    KR, KH, KK = np.asarray(known_r, float), np.asarray(known_h, float), np.asarray(known_k, int)
+    FP = np.vstack([p for p in fill_p if len(p)]) if any(len(p) for p in fill_p) else np.zeros((0, 2))
+    FR = np.concatenate([r for r in fill_r if len(r)]) if any(len(r) for r in fill_r) else np.zeros(0)
+    FH, FK = np.zeros(len(FP)), np.full(len(FP), -1, dtype=int)
 
-    def stack(ps: list, rs: list) -> tuple[np.ndarray, np.ndarray]:
-        ps = [p for p in ps if len(p)]
-        rs = [r for r in rs if len(r)]
-        return (np.vstack(ps), np.concatenate(rs)) if ps else (np.zeros((0, 2)), np.zeros(0))
+    def keep(mask_fn, *arrays):
+        if not len(arrays[0]):
+            return arrays
+        ok = mask_fn(arrays[0])
+        return tuple(a[ok] for a in arrays)
 
-    def keep_off(P: np.ndarray, R: np.ndarray, geom: Any, inside_ok: bool = False) -> tuple[np.ndarray, np.ndarray]:
-        if not len(P) or geom is None or geom.is_empty:
-            return P, R
-        shapely.prepare(geom)
-        hit = shapely.contains_xy(geom, P[:, 0], P[:, 1])
-        ok = hit if inside_ok else ~hit
-        return P[ok], R[ok]
+    def off(geom: Any):
+        def fn(P: np.ndarray) -> np.ndarray:
+            if geom is None or geom.is_empty:
+                return np.ones(len(P), dtype=bool)
+            shapely.prepare(geom)
+            return ~shapely.contains_xy(geom, P[:, 0], P[:, 1])
+        return fn
 
-    KP, KR = stack(known_p, known_r)
-    FP, FR = stack(fill_p, fill_r)
-    KP, KR = keep_off(KP, KR, inside, inside_ok=True)
-    FP, FR = keep_off(FP, FR, inside, inside_ok=True)
-    KP, KR = keep_off(KP, KR, blocked_light if blocked_light is not None else blocked)
-    FP, FR = keep_off(FP, FR, blocked)
+    def within(geom: Any):
+        def fn(P: np.ndarray) -> np.ndarray:
+            if geom is None:
+                return np.ones(len(P), dtype=bool)
+            shapely.prepare(geom)
+            return shapely.contains_xy(geom, P[:, 0], P[:, 1])
+        return fn
+
+    KP, KR, KH, KK = keep(within(inside), KP, KR, KH, KK)
+    FP, FR, FH, FK = keep(within(inside), FP, FR, FH, FK)
+    KP, KR, KH, KK = keep(off(blocked_light if blocked_light is not None else blocked), KP, KR, KH, KK)
+    FP, FR, FH, FK = keep(off(blocked), FP, FR, FH, FK)
     P, R = np.vstack([KP, FP]), np.concatenate([KR, FR])
+    H, K = np.concatenate([KH, FH]), np.concatenate([KK, FK])
+    # the kind of the trees nobody told us about: conifer woods, else a share by place
+    unknown = K < 0
+    if unknown.any():
+        K[unknown] = (rng.random(int(unknown.sum())) < conifer_share).astype(int)
+        if conifer_woods is not None and not conifer_woods.is_empty:
+            shapely.prepare(conifer_woods)
+            inside_cw = shapely.contains_xy(conifer_woods, P[:, 0], P[:, 1]) & unknown
+            K[inside_cw] = 1
     if len(P) > MAX_TREES:
         sel = rng.choice(len(P), MAX_TREES, replace=False)
-        P, R = P[sel], R[sel]
-    return P, R
+        P, R, H, K = P[sel], R[sel], H[sel], K[sel]
+    return P, R, H, K
+
+
+def conifer_share(lat: float, elev_m: float) -> float:
+    """Share of conifers among trees nobody classified: the boreal north, high mountains, a few elsewhere."""
+    a = abs(lat)
+    if a >= 55:
+        return 0.85
+    if a >= 45:
+        return 0.35 + (0.4 if elev_m > 900 else 0.0)
+    if a >= 25:
+        return 0.1 + (0.6 if elev_m > 1400 else 0.25 if elev_m > 900 else 0.0)
+    return 0.02 + (0.4 if elev_m > 2500 else 0.0)
+
+
+def marker(x: float, y: float, ground: float, size: float = 2.0) -> Manifold:
+    """A map pin standing on the ground: a ball on a cone whose point sinks a little into it."""
+    r = size / 2.0
+    stem = Manifold.cylinder(size * 1.6, 0.05, r * 0.62, 24).translate((x, y, ground - 0.4))
+    ball = Manifold.sphere(r, 32).translate((x, y, ground - 0.4 + size * 1.6 + r * 0.35))
+    return stem + ball
 
 
 # -- bridges ------------------------------------------------------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from .hoard_link.agentkit import Empty, Tool, ann
 from .hoard_link.agentkit import call_tool as _call_tool
 from .hoard_link.agentkit import tool_catalog as _catalog
 from .hoard_link.agentkit import uncapped  # noqa: F401 - re-exported for the UI routes
-from .params import ModelParams
+from .params import NULLABLE, ModelParams
 from .services import Services
 
 AGENT_INSTRUCTIONS = """Gulliver's Hoard makes printable 3D map models: a place on the map becomes a closed solid with relief, buildings, water, roads, rail and parks, cut into tiles that fit the printer bed, as STL, a 3MF with one coloured part per filament, and a 3D preview.
@@ -121,20 +121,29 @@ class CacheClearArgs(BaseModel):
 def _patch(p: Any) -> dict[str, Any]:
     if p is None:
         return {}
-    return {k: v for k, v in p.model_dump().items() if v is not None}
+    return {k: v for k, v in p.model_dump(exclude_unset=True).items() if v is not None or k in NULLABLE}
+
+
+def _around_track(values: dict[str, Any]) -> dict[str, Any]:
+    """With a route and no centre, the model is framed on the route (its bounding box plus a margin)."""
+    if ("lon" not in values or "lat" not in values) and (values.get("track") or "").strip():
+        from .track import centre_and_size, parse
+        lon, lat, w, h = centre_and_size(parse(values["track"]))
+        values = {"lon": lon, "lat": lat, "width_m": round(w), "height_m": round(h), **values}
+    return values
 
 
 def _check(s: Services, a: CheckArgs) -> dict[str, Any]:
-    values = _patch(a.params)
+    values = _around_track(_patch(a.params))
     if "lon" not in values or "lat" not in values:
-        raise ValueError("params.lon and params.lat are required.")
+        raise ValueError("params.lon and params.lat are required (or a track to frame the model on).")
     return s.area_check(s.make_params(values, a.preset or ""), fetch=a.fetch_features)
 
 
 def _create(s: Services, a: CreateArgs) -> dict[str, Any]:
-    values = _patch(a.params)
+    values = _around_track(_patch(a.params))
     if "lon" not in values or "lat" not in values:
-        raise ValueError("params.lon and params.lat are required.")
+        raise ValueError("params.lon and params.lat are required (or a track to frame the model on).")
     return s.create(a.name, values, preset=a.preset or "", place=a.place, build_now=a.build)
 
 
@@ -162,11 +171,16 @@ TOOLS: list[Tool] = [
     Tool("presets_get", _d("Presets (city, landscape, relief), default parameters and part colours. Preajustes.",
                            synonyms="opciones, parámetros por defecto"), Empty, R, lambda s, a: s.presets()),
     Tool("model_create", _d("Create a map model of a place and build it (a job). Crear maqueta.",
-                            "Required: params.lon, params.lat. Typical: width_m/height_m (ground), size_mm, preset, tiles_x/tiles_y. "
-                            "Detail: trees/tree_density, roofs (auto|tagged|flat), arches, paths, rails, zones/snow_m (snow and rock), "
-                            "road_depth_mm.",
+                            "Required: params.lon, params.lat (or params.track alone: the model is framed on the route). Typical: "
+                            "width_m/height_m (ground), size_mm, preset, tiles_x/tiles_y. Anywhere on Earth: worldwide building "
+                            "footprints, canopy-height trees, satellite land cover; laser heights where open (dsm_heights). "
+                            "Detail: trees/tree_density, roofs, arches, paths, rails, zones/snow_m, fields/field_rows (farm "
+                            "parcels with crop rows), plazas, road_depth_mm. Personal: highlight_lon/highlight_lat (your home in "
+                            "gold), track (GPX/KML/GeoJSON text as a raised ribbon). Finish: frame_mm, frame_style "
+                            "(flat|bevel|step), plaque/plaque_text, panels_x/panels_y (framed pictures), tile_cuts (straight|streets), "
+                            "thicken, nozzle_mm. The report carries a printability score and advice.",
                             synonyms="maqueta 3d, mapa imprimible, stl de un sitio, ciudad en 3d, relieve, maqueta de ciudad, terrain, "
-                                     "arboles 3d, montaña con nieve"),
+                                     "arboles 3d, montaña con nieve, mi casa, ruta gpx, placa, díptico, cuadros, campos, parcelas"),
          CreateArgs, WD, _create, 600.0),
     Tool("model_list", _d("The model library: name, place, status, scale, size. Lista de maquetas.", synonyms="biblioteca, mis maquetas"),
          Empty, R, _list),
