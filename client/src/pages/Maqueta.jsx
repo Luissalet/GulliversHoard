@@ -36,6 +36,20 @@ export default function Maqueta({ param }) {
     return () => clearInterval(timer);
   }, [active, reload, changed]);
 
+  // a build started from elsewhere (the assistant, MCP, another tab) while this page shows a finished model
+  const shownBuild = m?.build?.id || "";
+  useEffect(() => {
+    if (active || !m) return undefined;
+    const timer = setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const fresh = await api.call("model_get", { model_id: param });
+        if (fresh.status !== m.status || (fresh.build?.id || "") !== shownBuild) reload();
+      } catch { /* deleted or the app restarting: the next reload shows it */ }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [active, m, param, shownBuild, reload]);
+
   const report = m?.report;
   const build = m?.build?.id;
   const glb = report && build ? fileUrl(m.id, "preview.glb", { build }) : null;
