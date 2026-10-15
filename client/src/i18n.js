@@ -270,7 +270,7 @@ const D = {
   delete_msg: ["Se borran sus parámetros y todos sus archivos generados.", "Its parameters and every generated file are deleted."],
   details: ["Fuentes y detalles", "Sources and details"],
   dem_used: ["Relieve: {src}, {res} m por muestra.", "Elevation: {src}, {res} m per sample."],
-  drawn: ["{roads} calles y vías, {water} tramos de agua, {bridges} puentes.", "{roads} streets and rails, {water} water pieces, {bridges} bridges."],
+  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes.", "{roads} streets and rails, {water} water bodies, {bridges} bridges."],
   contours_every: ["Curvas de nivel cada {m} m.", "Contour lines every {m} m."],
 
   // settings

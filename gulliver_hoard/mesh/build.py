@@ -2,8 +2,8 @@
 green, frame), optionally cut into tiles with pin holes, every part a closed manifold.
 
 Order of work: elevation grid (smoothed to the source's real resolution), sea traced from the elevation, the terrain
-solid with roads / rails / contour lines cut or raised along their real outlines, water cut into it at a flat level per
-piece (lakes stay flat, long rivers step down), bridges over water, buildings standing on the lowest point of their
+solid with roads / rails / contour lines cut or raised along their real outlines, water cut into it down to one continuous
+surface (lakes flat, rivers sloping gently with no steps), bridges over water, buildings standing on the lowest point of their
 footprint, then the outline shape, the frame, the text on the bottom, the tiles and their pin holes. In colour mode the
 same solid is partitioned into parts (one per filament) that fit each other exactly."""
 
@@ -60,7 +60,7 @@ ROAD_ISLAND_MM2 = 0.8         # traffic islands smaller than this become road
 MIN_BUILDING_ABS_MM2 = 0.06   # below this a building is never drawn, whatever block it belongs to
 CONTOUR_MM = 0.5              # width of an engraved contour line
 PATH_KINDS = {"footway", "path", "cycleway", "steps", "bridleway", "track", "pedestrian"}
-WATER_PIECE_M = 300.0         # a water body longer than this is split so its level can step down
+WATER_REACH_M = 150.0         # the water level at a point is never above the lowest ground this far along the water
 LABEL_DEPTH_MM = 0.6
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
 
@@ -206,6 +206,48 @@ def _shifted(solid: Any, dz: float, W: float, H: float, grow: float) -> Any:
     never sit on the original's walls."""
     return solid.translate((-W / 2.0, -H / 2.0, 0.0)).scale(((W + 2 * grow) / W, (H + 2 * grow) / H, 1.0)).translate(
         (W / 2.0, H / 2.0, dz))
+
+
+def _water_levels(Z0: np.ndarray, wet: np.ndarray, cell_mm: float, reach_mm: float, flat_mm: float = 0.25) -> tuple[np.ndarray, int]:
+    """The water surface as a grid (mm), defined everywhere (outside the water it repeats the nearest water point).
+
+    A river falls along its course, so one flat level per water body would sit above the ground downstream (or bury the
+    banks upstream), and flat levels per piece leave terraces: straight steps across the river. Here, body by body, the
+    level at each wet point is the lowest ground of that body within ``reach_mm`` (never above the nearby banks), smoothed
+    along the water, then held under the ground right around it: a surface that slopes gently and has no steps. A body
+    whose level hardly changes (lakes, reservoirs, ponds) stays exactly flat at its lowest point.
+    Returns (levels, number of water bodies)."""
+    from scipy import ndimage as ndi
+
+    if not wet.any():
+        return Z0.copy(), 0
+    big = float(Z0.max()) + 1000.0
+    L = np.full(Z0.shape, big)
+    r = max(1, int(round(reach_mm / max(cell_mm, 1e-6))))
+    sigma = max(1.0, r / 2.0)
+    m = r + int(3 * sigma) + 2
+    lab, n = ndi.label(wet, structure=np.ones((3, 3)))
+    for body, sl in enumerate(ndi.find_objects(lab), start=1):
+        if sl is None:
+            continue
+        ys_ = slice(max(0, sl[0].start - m), min(Z0.shape[0], sl[0].stop + m))
+        xs_ = slice(max(0, sl[1].start - m), min(Z0.shape[1], sl[1].stop + m))
+        mine = lab[ys_, xs_] == body
+        G = np.where(mine, Z0[ys_, xs_], big)
+        near = ndi.minimum_filter(G, size=5)
+        lo = float(G[mine].min())
+        if float(near[mine].max()) - lo <= flat_mm:
+            level = np.full(G.shape, lo)
+        else:
+            low = ndi.minimum_filter(G, size=2 * r + 1)
+            w = ndi.gaussian_filter(mine.astype(np.float64), sigma)
+            smooth = ndi.gaussian_filter(np.where(mine, low, 0.0), sigma) / np.maximum(w, 1e-9)
+            level = np.minimum(smooth, near)
+            if float(level[mine].max() - level[mine].min()) <= flat_mm:
+                level = np.full(G.shape, float(level[mine].min()))
+        L[ys_, xs_] = np.where(mine, level, L[ys_, xs_])
+    _d, (iy, ix) = ndi.distance_transform_edt(~wet, return_indices=True)
+    return L[iy, ix], n
 
 
 def _close(geom: Any, gap: float, min_hole: float) -> Any:
@@ -455,45 +497,35 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         terrain = S.subtract(terrain, relief_cuts)
     top = max(top, terrain.bounding_box()[5])
 
-    # 5. water cut at a flat level per piece ---------------------------------------------------------------------------
-    # One prism of the whole water outline, intersected with "slabs" that start at each piece's floor: the walls of the
-    # cut are the real banks (never two coincident walls), and the floor steps down from piece to piece.
-    water_levels: list[float] = []
+    # 5. water: one continuous surface ------------------------------------------------------------------------------------
+    # The level is a grid (see _water_levels): rivers slope gently with no terraces, lakes stay flat. The cut is the water
+    # outline's prism above the floor surface (level − depth), so the walls of the cut are the real banks; the water part
+    # fills from that floor up to the level. Both surfaces are heightfields on a copy of the grid padded past the outline,
+    # so none of their walls meets another solid's wall.
+    water_bodies = 0
+    level_grid = None
     cut = S.EMPTY
     water_solid = S.EMPTY
     if water_geom is not None:
         clock.step(0.45, "Water")
-        piece_mm = WATER_PIECE_M * k
+        wet = _inside(water_geom.buffer(p.resolution_mm * 0.75), X, Y)
+        level_grid, water_bodies = _water_levels(Z0, wet, p.resolution_mm, WATER_REACH_M * k)
         minx, miny, maxx, maxy = water_geom.bounds
-        gx = max(1, int(math.ceil((maxx - minx) / piece_mm)))
-        gy = max(1, int(math.ceil((maxy - miny) / piece_mm)))
-        shapely.prepare(water_geom)
-        up_slabs, level_slabs, floors = [], [], []
-        for a in range(gx):
-            for b in range(gy):
-                cell = box(minx + a * piece_mm, miny + b * piece_mm, minx + (a + 1) * piece_mm, miny + (b + 1) * piece_mm)
-                if not water_geom.intersects(cell):
-                    continue
-                for poly in S.polygons(water_geom.intersection(cell)):
-                    if poly.area < 0.02:
-                        continue
-                    inside = _inside(poly, X, Y)
-                    if inside.any():
-                        level = float(Z0[inside].min())
-                    else:
-                        pt = poly.representative_point()
-                        level = float(_sample(Z0, xs, ys, np.array([pt.x]), np.array([pt.y]))[0])
-                    floor = max(level - p.water_depth_mm, 0.6)
-                    slab = poly.buffer(0.5, join_style="mitre").intersection(cell)
-                    up_slabs.append(S.prism(slab, floor, over_top + 5.0))
-                    level_slabs.append(S.prism(slab, floor, max(level, floor + 0.2)))
-                    floors.append(floor)
-                    water_levels.append(level)
-        if up_slabs:
-            gfloor = min(floors) - 0.5
+        pad = 2 * p.resolution_mm
+        jx = np.where((xs >= minx - pad) & (xs <= maxx + pad))[0]
+        iy = np.where((ys >= miny - pad) & (ys <= maxy + pad))[0]
+        if len(jx) >= 2 and len(iy) >= 2:
+            sub = (slice(iy[0], iy[-1] + 1), slice(jx[0], jx[-1] + 1))
+            floor_g = np.maximum(level_grid[sub] - p.water_depth_mm, 0.6)
+            top_g = np.maximum(level_grid[sub], floor_g + 0.2)
+            fz, fx, fy = _padded(floor_g, xs[jx[0]:jx[-1] + 1], ys[iy[0]:iy[-1] + 1], pad=1.5)
+            tz, _tx, _ty = _padded(top_g, xs[jx[0]:jx[-1] + 1], ys[iy[0]:iy[-1] + 1], pad=1.5)
+            below_floor = S.heightfield(fz, fx, fy)
+            below_top = S.heightfield(tz, fx, fy)
+            gfloor = float(floor_g.min()) - 0.5
             outline_prism = S.prism(water_geom, gfloor, over_top + 5.0)
-            cut = S.intersect(outline_prism, S.union(up_slabs))
-            water_solid = S.intersect(outline_prism, S.union(level_slabs))
+            cut = S.subtract(outline_prism, [below_floor])
+            water_solid = S.subtract(S.intersect(outline_prism, below_top), [below_floor])
     if sea_poly is not None:
         # the sea: cut to a flat floor along the traced coastline (which reaches past the border, see _padded)
         cut = S.union([cut, S.prism(sea_poly, base - p.water_depth_mm, over_top + 5.0)])
@@ -521,7 +553,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 deck -= p.road_depth_mm      # the deck carries on the groove of the road
             over = line.intersection(water_geom)
             probe = detail.along([g for g in getattr(over, "geoms", [over]) if g.geom_type == "LineString"], 0.5)
-            level = float(_sample(Z0, xs, ys, probe[:, 0], probe[:, 1]).min()) if len(probe) else base
+            surface = level_grid if level_grid is not None else Z0
+            level = float(_sample(surface, xs, ys, probe[:, 0], probe[:, 1]).min()) if len(probe) else base
             shape = line.buffer(width / 2.0 + 0.15, cap_style="flat").intersection(model_box)
             if not shape.is_empty:
                 spans.append((line, shape, width + 0.3, deck, level))
@@ -873,7 +906,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "building_source": building_source,
         "roads_drawn": len(road_lines),
         "road_rank": rank,
-        "water_pieces": len(water_levels),
+        "water_pieces": water_bodies,
         "sea": bool(sea.any()),
         "contour_interval_m": interval,
         "bridges": len(spans),
@@ -893,5 +926,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     masks = {"water": water_mask, "roads": road_mask & ~water_mask, "contours": contour_mask}
     footprints = {"outline": outer, "model": footprint, "buildings": building_shapes, "water": water_geom, "roads": roads_geom,
                   "green": green_mm, "rails": rail_shape, "paths": path_shape, "trees": (P, R) if n_trees else None,
-                  "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock")}
+                  "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock"),
+                  "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None}
     return BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)

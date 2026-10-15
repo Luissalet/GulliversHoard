@@ -236,3 +236,43 @@ def test_mountain_gets_snow_and_rock():
     assert r.stats["size_mm"][2] <= 0.3 * 120 + p.base_mm + 0.5          # the exaggeration was capped
     assert any("exaggeration lowered" in n for n in r.notes)
     assert closed(r.parts["snow"]) and closed(r.parts["rock"]) and closed(r.single)
+
+
+def test_water_level_is_one_surface_without_terraces():
+    from gulliver_hoard.mesh.build import _water_levels
+    ny, nx = 40, 200
+    xs = np.arange(nx)
+    Z0 = np.tile(10.0 - xs * 0.01, (ny, 1)) + np.random.default_rng(1).normal(0, 0.02, (ny, nx))   # a river falling 2 mm
+    Z0[:, :] += np.abs(np.arange(ny) - 20)[:, None] * 0.3                                          # banks rise
+    wet = np.zeros((ny, nx), dtype=bool)
+    wet[16:25, :] = True
+    lake = np.zeros_like(wet)
+    lake[2:8, 20:60] = True
+    Z0[lake] = 12.0 + np.random.default_rng(2).normal(0, 0.03, lake.sum())
+    L, bodies = _water_levels(Z0, wet | lake, cell_mm=0.5, reach_mm=5.0)
+    assert bodies == 2
+    river = L[20]
+    assert river[0] - river[-1] > 1.5                                   # it falls with the ground...
+    assert np.abs(np.diff(river)).max() < 0.05                          # ...with no step anywhere along it
+    assert (L[wet] <= Z0[wet] + 1e-9).all()                             # never above the ground it covers
+    assert np.ptp(L[lake]) == 0 and L[lake].max() <= Z0[lake].min() + 1e-9   # the lake is one flat level
+
+
+def test_river_top_has_no_walls_inside_the_water():
+    r = build(make(color="color"), FakeSources(), name="L")
+    v, t = S.mesh_arrays(r.parts["water"])
+    tri = v[t].astype(np.float64)
+    n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    n /= np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None]
+    walls = tri[np.abs(n[:, 2]) < 0.3].mean(axis=1)
+    import shapely
+    W, H = r.stats["size_mm"][:2]
+    inner = r.footprints["water"].intersection(box(0, 0, W, H).buffer(-0.6)).buffer(-0.6)   # not the banks, not the sides
+    inside = shapely.contains_xy(inner, walls[:, 0], walls[:, 1]) if len(walls) else np.zeros(0, bool)
+    # the old flat pieces left a step (a wall) across the river wherever two pieces met; walls now only stand at the banks
+    # and under the bridges
+    bridges = r.footprints.get("bridges")
+    assert bridges is not None
+    if len(walls):
+        inside &= ~shapely.contains_xy(bridges.buffer(0.6), walls[:, 0], walls[:, 1])
+    assert inside.sum() == 0
