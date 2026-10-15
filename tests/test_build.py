@@ -473,3 +473,41 @@ def test_snow_lies_in_patches_not_on_cliffs():
     band = (elev > 2180) & (elev < 2290)
     assert m[:, 61:][band[:, 61:]].mean() > 0.8               # below the line only on the shaded side
     assert m[:, :59][band[:, :59]].mean() < 0.05
+
+
+def test_tunnel_mouths_open_in_the_hillside():
+    class Hill(FakeSources):
+        def dem(self, bbox, want_res_m, **_):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            u = np.linspace(-1, 1, 240)
+            U, V = np.meshgrid(u, u)
+            data = (300.0 + 220.0 * np.clip((0.4 - np.abs(U)) / 0.08, 0, 1)).astype(np.float32)   # a steep hill north-south
+            step = ((lon_max - lon_min) / 239, (lat_max - lat_min) / 239)
+            return Composite(DemGrid(data, "lonlat", (lon_min, lat_max), step, source="hill", res_m=10), None)
+
+        def osm(self, bbox, **_):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            lat = (lat_min + lat_max) / 2
+            at = lambda t: {"lat": lat, "lon": lon_min + (lon_max - lon_min) * t}       # noqa: E731
+            return {"elements": [
+                {"type": "way", "id": 1, "tags": {"highway": "primary"}, "geometry": [at(0.05), at(0.3)]},
+                {"type": "way", "id": 2, "tags": {"highway": "primary", "tunnel": "yes", "layer": "-1"},
+                 "geometry": [at(0.3), at(0.7)]},
+                {"type": "way", "id": 3, "tags": {"highway": "primary"}, "geometry": [at(0.7), at(0.95)]},
+                {"type": "way", "id": 4, "tags": {"highway": "primary", "tunnel": "yes"},              # under a flat street
+                 "geometry": [{"lat": lat_min + (lat_max - lat_min) * 0.2, "lon": lon_min + (lon_max - lon_min) * t}
+                              for t in (0.05, 0.15)]},
+            ]}
+
+    p = make(color="color", width_m=2400, height_m=2400, size_mm=100, resolution_mm=0.4, buildings=False, trees=False,
+             z_exag=1.5, contours_m=0)
+    r = build(p, Hill(), name="Túnel")
+    assert r.stats["tunnels"] == 2
+    assert all(closed(m) for m in r.parts.values()) and closed(r.single)
+    west = min(S.polygons(r.footprints["tunnels"]), key=lambda g: g.bounds[0])
+    c = west.centroid                                      # inside the west mouth: hill (roof), its underside, floor, bottom
+    x_in, y_in = west.bounds[2] - 0.2, c.y + 0.03
+    zs = _heights_at(r.single, x_in, y_in)
+    assert len(zs) >= 4 and zs[1] - zs[2] >= 0.5, zs
+    off = build(p.model_copy(update={"tunnels": False}), Hill(), name="Túnel")
+    assert off.stats["tunnels"] == 0 and len(_heights_at(off.single, x_in, y_in)) == 2

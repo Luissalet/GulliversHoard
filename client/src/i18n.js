@@ -121,6 +121,8 @@ const D = {
   l_paths_help: ["En la ciudad, los de parques y bosques; con «todo el campo en verde», todas las sendas, también por la roca y la nieve. Dejan ver el terreno.", "In a town, the ones in parks and woods; with «All open land green» on, every trail, over rock and snow too. They show the ground."],
   l_arches: ["Puentes con arcos y pilas", "Bridges on arches and piers"],
   l_arches_help: ["Apagado: un bloque macizo hasta el agua; los pasos sobre calles y vías, solo el tablero.", "Off: a solid block down to the water; bridges over streets and railways, just the deck."],
+  l_tunnels: ["Bocas de túnel", "Tunnel mouths"],
+  l_tunnels_help: ["Una abertura en la ladera donde la carretera o el tren entra en el monte.", "An opening in the slope where a road or railway goes into a hill."],
   l_zones: ["Nieve y roca", "Snow and rock"],
   l_zones_help: ["Cumbres nevadas y pendientes de roca como colores aparte.", "Snowy summits and rocky slopes as colours of their own."],
   l_ground_photo: ["Roca, prados y bosques desde la ortofoto", "Rock, meadows and woods from the aerial photo"],
@@ -276,7 +278,7 @@ const D = {
   delete_msg: ["Se borran sus parámetros y todos sus archivos generados.", "Its parameters and every generated file are deleted."],
   details: ["Fuentes y detalles", "Sources and details"],
   dem_used: ["Relieve: {src}, {res} m por muestra.", "Elevation: {src}, {res} m per sample."],
-  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes ({overpasses} sobre calles, vías o barrancos), {weirs} azudes y presas, {piers} muelles y espigones.", "{roads} streets and rails, {water} water bodies, {bridges} bridges ({overpasses} over streets, railways or ravines), {weirs} weirs and dams, {piers} piers and breakwaters."],
+  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes ({overpasses} sobre calles, vías o barrancos), {weirs} azudes y presas, {piers} muelles y espigones, {tunnels} bocas de túnel.", "{roads} streets and rails, {water} water bodies, {bridges} bridges ({overpasses} over streets, railways or ravines), {weirs} weirs and dams, {piers} piers and breakwaters, {tunnels} tunnel mouths."],
   contours_every: ["Curvas de nivel cada {m} m.", "Contour lines every {m} m."],
 
   // settings

@@ -62,6 +62,7 @@ class ModelParams(BaseModel):
     rail_height_mm: float = Field(0.35, ge=0.1, le=3, description="How far railway beds stand above the ground.")
     bridges: bool = True
     arches: bool = Field(True, description="Bridges over water stand on arches and piers (off: a solid block down to the water).")
+    tunnels: bool = Field(True, description="Tunnel mouths: an opening in the slope where a road or railway goes into a hill.")
     green: bool = True
     paths: bool = Field(True, description="Footpaths inside parks and woods, cut out of the green layer; with meadows on, every trail across the land, over rock and snow too.")
     min_path_mm: float = Field(0.4, ge=0.2, le=3, description="Narrowest path on the model.")

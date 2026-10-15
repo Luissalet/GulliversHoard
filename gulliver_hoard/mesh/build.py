@@ -107,6 +107,9 @@ PART_LABELS = {
 SKIN_MM = 0.6                 # thickness of a colour layer on top of the terrain
 BRIDGE_DECK_MM = 0.5          # thickness of a bridge deck over its arches
 OVERPASS_DECK_MM = 0.35       # a bridge off the water (over a street, a railway) is thinner: the clearance under it is small
+TUNNEL_DEPTH_MM = 1.2         # a tunnel mouth goes this far into the hill
+TUNNEL_HEIGHT_MM = 0.6        # ...this high at least
+TUNNEL_ROOF_MM = 0.4          # ...and only where the hill stands this much over it
 OVERPASS_DIP_MM = 0.15        # ...and drawn when the ground under it is at least its thickness plus this below the deck
 # structures across or into the water: kind -> (narrowest mm, real width m, top above the water mm)
 WEIR = {"weir": (0.4, 3.0, 0.25), "dam": (0.6, 8.0, 0.6),
@@ -821,8 +824,13 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     clock.step(0.25, "Roads and contour lines")
     rank = p.effective_road_rank()
     road_lines, bridge_lines, rail_lines, path_lines = [], [], [], []
+    tunnel_lines: list[tuple[Any, float]] = []
     for r in feats.roads:
-        if r.tunnel or r.line is None:
+        if r.line is None:
+            continue
+        if r.tunnel:
+            if r.rank <= rank and p.roads != "none":
+                tunnel_lines.append((to_mm(r.line), max(r.width_m * k, p.min_road_mm)))
             continue
         if r.rank > rank or p.roads == "none":
             if p.paths and r.kind in PATH_KINDS:
@@ -839,6 +847,9 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 continue
             line = to_mm(rail.line)
             width = max(rail.width_m * k, p.min_road_mm * 0.9)
+            if rail.tunnel:
+                tunnel_lines.append((line, width))
+                continue
             rail_lines.append((line, width))
             if rail.bridge:
                 bridge_lines.append((line, width, "rail"))
@@ -1006,6 +1017,33 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     if contour_shape is not None:
         relief_cuts.append(S.subtract(S.prism(contour_shape, -1.3, over_top),
                                       [_shifted(terrain, -p.contour_depth_mm, W_mm, H_mm, 0.05)]))
+    # tunnel mouths: where a road or a railway goes into a hill, a dark opening at the foot of the slope, with the hill as
+    # its roof (the elevation model has no tunnel; it only shows the hill over it)
+    tunnels = 0
+    mouths = []
+    if p.tunnels and tunnel_lines:
+        inner_box = model_box.buffer(-1.0)
+        floor_dz = -p.road_depth_mm if p.roads == "engraved" else 0.0
+        for line, width in tunnel_lines:
+            for piece in [g for g in getattr(line, "geoms", [line]) if g.geom_type == "LineString"]:
+                if piece.length < 2.0 * TUNNEL_DEPTH_MM:
+                    continue
+                for at_start in (True, False):
+                    e = np.array(piece.coords[0 if at_start else -1])
+                    if not inner_box.contains(Point(*e)):
+                        continue
+                    q = np.array(piece.interpolate(TUNNEL_DEPTH_MM if at_start else piece.length - TUNNEL_DEPTH_MM).coords[0])
+                    d = (q - e) / max(float(np.hypot(*(q - e))), 1e-9)
+                    out = e - 0.5 * d
+                    zz = _sample(Z, xs, ys, np.array([out[0], e[0], q[0]]), np.array([out[1], e[1], q[1]]))
+                    floor = float(min(zz[0], zz[1])) + floor_dz
+                    h = max(TUNNEL_HEIGHT_MM, min(1.2, 0.8 * width))
+                    if float(zz[2]) < floor + h + TUNNEL_ROOF_MM:
+                        continue                 # no hill over it: an underpass, a covered street
+                    mouth = LineString([e - 0.3 * d, q]).buffer(width / 2.0, cap_style="flat")
+                    relief_cuts.append(S.prism(mouth, floor, floor + h))
+                    mouths.append(mouth)
+                    tunnels += 1
     if relief_cuts:
         terrain = S.subtract(terrain, relief_cuts)
     top = max(top, terrain.bounding_box()[5])
@@ -1689,6 +1727,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "contour_interval_m": interval,
         "bridges": len(spans),
         "overpasses": overpasses,
+        "tunnels": tunnels,
         "weirs": len(weir_shapes),
         "piers": pier_count,
         "shore_lines": shore_lines,
@@ -1724,6 +1763,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                   "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock"),
                   "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None,
                   "weirs": shapely.union_all(np.array(weir_shapes, dtype=object)) if weir_shapes else None,
+                  "tunnels": shapely.union_all(np.array(mouths, dtype=object)) if mouths else None,
                   "plazas": zone_shapes.get("plazas"), "fields": zone_shapes.get("fields"), "track": track_shape}
     result = BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole,
                          colors=palette_colors(p.palette))

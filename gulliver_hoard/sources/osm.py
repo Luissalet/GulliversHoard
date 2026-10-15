@@ -131,6 +131,7 @@ class Features:
             "bridges": sum(1 for r in self.roads if r.bridge),
             "rails": len(self.rails),
             "rail_bridges": sum(1 for r in self.rails if r.bridge),
+            "tunnels": sum(1 for r in self.roads + self.rails if r.tunnel),
             "building_parts": sum(1 for b in self.buildings if b.part),
             "roofs": sum(1 for b in self.buildings if b.roof not in ("", "flat")),
             "trees": len(self.trees),
@@ -523,10 +524,9 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
                                     name=tags.get("name", "")))
             continue
         if kind == "way" and tags.get("railway") in RAIL_KINDS:
-            if tags.get("tunnel") not in (None, "no") or tags.get("layer", "0").startswith("-"):
-                continue
             gauge = 3.0 if tags["railway"] in ("tram", "funicular", "monorail", "narrow_gauge") else 4.5
             feats.rails.append(Road(line, tags["railway"], gauge, 0, bridge=tags.get("bridge") not in (None, "no"),
+                                    tunnel=tags.get("tunnel") not in (None, "no") or tags.get("layer", "0").startswith("-"),
                                     name=tags.get("name", "")))
             continue
         if _is_green(tags, ROCK_TAGS) and shape is not None:
