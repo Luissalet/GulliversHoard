@@ -13,6 +13,8 @@ const BEDS = [
   { id: "ender3", label: "Ender 3 (220 × 220)", x: 220, y: 220 },
 ];
 
+const MASK = "••••••";   // a key that is set: the server never sends it back
+
 export default function Ajustes() {
   const { t, lang, notify, version, confirm } = useApp();
   const { data, error, reload } = useLoad(() => api.call("settings_get"), [version]);
@@ -91,6 +93,11 @@ export default function Ajustes() {
       <section className="panel space-y-3">
         <h2>{t("sources")}</h2>
         <Field label={t("overpass_servers")} hint={t("overpass_help")}><textarea className="field" rows={3} value={form.overpass_servers} onChange={(e) => set({ overpass_servers: e.target.value })} /></Field>
+        <Field label={t("dk_token")} hint={t("dk_token_help")}>
+          <input className="field mono" type="password" autoComplete="off" value={form.dataforsyningen_token || ""}
+            onFocus={(e) => { if (form.dataforsyningen_token === MASK) e.target.select(); }}
+            onChange={(e) => set({ dataforsyningen_token: e.target.value })} placeholder={t("dk_token_ph")} />
+        </Field>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 help">{cache.data ? t("cache_size", { size: bytes(cache.data.bytes, lang), n: cache.data.files }) : "…"}</div>
           <Busy busy={busy.clear} className="btn btn-danger" onClick={clear}><Icon d={ICONS.trash} size={14} /> {t("cache_clear")}</Busy>

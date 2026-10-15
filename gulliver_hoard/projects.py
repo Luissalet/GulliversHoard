@@ -99,7 +99,9 @@ class Projects:
         return self.create(name or f"{rec['name']} (copia)", ModelParams(**rec["params"]), place=rec.get("place", ""),
                            preset=rec.get("preset", ""))
 
-    def finish_build(self, pid: str, build_id: str, report: dict[str, Any], keep: int) -> dict[str, Any]:
+    def finish_build(self, pid: str, build_id: str, report: dict[str, Any], keep: int,
+                     params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """Make ``build_id`` the current build, remember the parameters it was made with, and prune the oldest builds."""
         with self._lock:
             rec = self._read(pid)
             builds = [b for b in rec.get("builds", []) if b != build_id]
@@ -107,24 +109,80 @@ class Projects:
             for old in builds[keep:]:
                 shutil.rmtree(self.build_dir(pid, old), ignore_errors=True)
             rec["builds"] = builds[:keep]
-            rec["build"] = {"id": build_id, "finished": time.time(), "report": summary(report)}
+            entry = {"id": build_id, "finished": time.time(), "report": summary(report)}
+            if params is not None:
+                entry["params"] = params
+                write_json_atomic(self.build_dir(pid, build_id) / "params.json", params)
+            history = [h for h in rec.get("history", []) if h.get("id") in rec["builds"] and h.get("id") != build_id]
+            rec["history"] = [entry] + history
+            rec["build"] = {k: v for k, v in entry.items() if k != "params"}
             rec["status"] = "ready"
             rec["error"] = ""
             self._write(rec)
             return rec
+
+    def builds(self, pid: str) -> list[dict[str, Any]]:
+        """The kept builds, newest first: id, when, the parameters they were made with (None for builds made before these
+        were remembered) and a summary of their report; ``current`` marks the one the model shows."""
+        rec = self.get(pid)
+        known = {h["id"]: h for h in rec.get("history", []) if h.get("id")}
+        cur = (rec.get("build") or {}).get("id")
+        out = []
+        for bid in rec.get("builds", []):
+            folder = self.build_dir(pid, bid)
+            if not folder.is_dir():
+                continue
+            h = dict(known.get(bid) or {})
+            if not h:
+                rep = read_json(folder / "report.json", None) or {}
+                h = {"id": bid, "finished": (folder / "report.json").stat().st_mtime if (folder / "report.json").exists() else None,
+                     "report": summary(rep) if rep else None}
+            if h.get("params") is None:
+                h["params"] = read_json(folder / "params.json", None)
+            h["current"] = bid == cur
+            out.append(h)
+        return out
+
+    def use_build(self, pid: str, build_id: str) -> dict[str, Any]:
+        """Show an earlier kept build again (and take back the parameters it was made with)."""
+        with self._lock:
+            rec = self._read(pid)
+            if build_id not in rec.get("builds", []) or not self.build_dir(pid, build_id).is_dir():
+                raise GulliverError("not_found", f"No kept build {build_id!r}.", "List them with model_builds.")
+            entry = next((h for h in self.builds(pid) if h["id"] == build_id), None) or {"id": build_id}
+            rec["build"] = {"id": build_id, "finished": entry.get("finished"), "report": entry.get("report")}
+            if entry.get("params"):
+                rec["params"] = entry["params"]
+            rec["builds"] = [build_id] + [b for b in rec["builds"] if b != build_id]
+            hist = rec.get("history", [])
+            rec["history"] = [h for h in hist if h.get("id") == build_id] + [h for h in hist if h.get("id") != build_id]
+            rec["status"] = "ready"
+            self._write(rec)
+            return rec
+
+    def build_folder(self, pid: str, build_id: str = "") -> Optional[Path]:
+        """The folder of a kept build (``build_id``) or of the current one."""
+        if not build_id:
+            return self.current_build_dir(pid)
+        rec = self.get(pid)
+        folder = self.build_dir(pid, build_id)
+        if build_id not in rec.get("builds", []) or not folder.is_dir():
+            raise GulliverError("not_found", f"No kept build {build_id!r}.", "List them with model_builds.")
+        return folder
 
     def current_build_dir(self, pid: str) -> Optional[Path]:
         rec = self.get(pid)
         b = rec.get("build")
         return self.build_dir(pid, b["id"]) if b else None
 
-    def report(self, pid: str) -> Optional[dict[str, Any]]:
-        folder = self.current_build_dir(pid)
+    def report(self, pid: str, build_id: str = "") -> Optional[dict[str, Any]]:
+        folder = self.build_folder(pid, build_id)
         return read_json(folder / "report.json", None) if folder else None
 
-    def file(self, pid: str, name: str) -> Path:
-        """A file of the current build, by its name relative to the build folder (no path tricks)."""
-        folder = self.current_build_dir(pid)
+    def file(self, pid: str, name: str, build_id: str = "") -> Path:
+        """A file of the current build (or of the kept build ``build_id``), by its name relative to the build folder (no
+        path tricks)."""
+        folder = self.build_folder(pid, build_id)
         if folder is None:
             raise GulliverError("not_found", "This model has not been built yet.", "Build it with model_build.")
         parts = Path(name.replace("\\", "/")).parts
@@ -141,4 +199,8 @@ def summary(report: dict[str, Any]) -> dict[str, Any]:
     out = {k: report.get(k) for k in keys}
     out["tiles"] = len(report.get("tiles") or [])
     out["parts"] = sorted((report.get("parts") or {}).keys())
+    pr = report.get("printability") or {}
+    out["score"] = pr.get("score")
+    out["verdict"] = pr.get("verdict")
+    out["fixes"] = len(pr.get("fixes") or [])
     return out

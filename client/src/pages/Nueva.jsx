@@ -193,8 +193,10 @@ export default function Nueva({ query }) {
   if (!form) return <div className="p-6"><span className="spinner" /> {t("loading")}</div>;
   const square = form.shape === "circle" || form.shape === "hexagon";
   const warn = (check?.warnings || []).map((w) => w[lang] || w.en);
-  const suggested = check?.suggested_tiles;
-  const tilesOff = suggested && (suggested[0] !== form.tiles_x || suggested[1] !== form.tiles_y) && !check.fits_bed;
+  const byPanels = form.panels_x * form.panels_y > 1;
+  const suggested = byPanels ? check?.suggested_panels : check?.suggested_tiles;
+  const tilesOff = suggested && !check.fits_bed && (byPanels ? (suggested[0] !== form.panels_x || suggested[1] !== form.panels_y)
+    : (suggested[0] !== form.tiles_x || suggested[1] !== form.tiles_y));
 
   return (
     <div className="new-layout">
@@ -245,7 +247,7 @@ export default function Nueva({ query }) {
         </div>
 
         <Summary check={check} error={checkError} features={features} form={form} busy={busy.features} onCount={countFeatures}
-          onTiles={tilesOff ? () => set({ tiles_x: suggested[0], tiles_y: suggested[1] }) : null} warnings={warn} />
+          onTiles={tilesOff ? () => set(byPanels ? { panels_x: suggested[0], panels_y: suggested[1] } : { tiles_x: suggested[0], tiles_y: suggested[1] }) : null} warnings={warn} />
 
         <Group title={t("g_area")} icon={ICONS.target} open>
           <div className="grid grid-cols-2 gap-3">
@@ -388,7 +390,7 @@ export default function Nueva({ query }) {
               <NumberField id="f-py" label={t("panels_y")} step={1} min={1} max={6} value={form.panels_y} onChange={(v) => set({ panels_y: v })} />
             </div>
             <span className="help mt-1 block">{t("panels_help")}</span>
-            {form.panels_x * form.panels_y > 1 && !(form.frame_mm > 0) && <div className="banner banner-warn mt-2">{t("panels_need_frame")}</div>}
+            {form.panels_x * form.panels_y > 1 && !(form.frame_mm > 0) && <div className="help mt-2">{t("panels_need_frame")}</div>}
           </div>
           <Toggle label={t("thicken")} checked={form.thicken} onChange={(v) => set({ thicken: v })} hint={t("thicken_help")} />
           <div className="grid grid-cols-2 gap-3">
@@ -492,11 +494,11 @@ function Summary({ check, error, features, form, busy, onCount, onTiles, warning
         <div><span>{t("scale")}</span><b>{check.scale}</b></div>
         <div><span>{t("model_size")}</span><b>{num(check.model_mm[0], 0, lang)} × {num(check.model_mm[1], 0, lang)} <small>mm</small></b></div>
         <div><span>{t("ground")}</span><b>{num(check.ground_m[0] / 1000, 2, lang)} × {num(check.ground_m[1] / 1000, 2, lang)} <small>km</small></b></div>
-        <div><span>{t("pieces")}</span><b>{check.tiles[0] * check.tiles[1]} <small>({num(check.tile_mm[0], 0, lang)} × {num(check.tile_mm[1], 0, lang)} mm)</small></b></div>
+        <div><span>{t(check.suggested_panels || (check.panels && check.panels[0] * check.panels[1] > 1) ? "panels_word" : "pieces")}</span><b>{check.panels && check.panels[0] * check.panels[1] > 1 ? check.panels[0] * check.panels[1] : check.tiles[0] * check.tiles[1]} <small>({num(check.tile_mm[0], 0, lang)} × {num(check.tile_mm[1], 0, lang)} mm)</small></b></div>
       </div>
       <div className="help">{t("sources_line", { dem: check.dem, roads: t(`rank_${check.road_rank}`) })}</div>
       {warnings.map((w, i) => <div key={i} className="banner banner-warn">{w}</div>)}
-      {onTiles && <button type="button" className="btn btn-sm" onClick={onTiles}><Icon d={ICONS.grid} size={13} /> {t("use_tiles", { x: check.suggested_tiles[0], y: check.suggested_tiles[1] })}</button>}
+      {onTiles && <button type="button" className="btn btn-sm" onClick={onTiles}><Icon d={ICONS.grid} size={13} /> {check.suggested_panels ? t("use_panels", { x: check.suggested_panels[0], y: check.suggested_panels[1] }) : t("use_tiles", { x: check.suggested_tiles[0], y: check.suggested_tiles[1] })}</button>}
       {features ? (
         <div className="help">{t("features_line", { b: num(features.buildings, 0, lang), r: num(features.roads, 0, lang), w: num(features.water_km2, 2, lang), g: num(features.green_km2, 2, lang) })}
           {features.trees != null && <div>{t("features_line2", { t: num(features.trees, 0, lang), p: num(features.building_parts || 0, 0, lang), f: num(features.roofs || 0, 0, lang), k: num(features.rail_bridges || 0, 0, lang) })}</div>}

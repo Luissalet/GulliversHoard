@@ -29,10 +29,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "language": "es",
     "keep_builds": 2,              # finished builds kept per project (the newest first)
     "export_dir": "",              # where export_copy writes when no folder is given (empty = Desktop/Gulliver)
+    "dataforsyningen_token": "",   # free token of Denmark's data supply: its laser surface model (empty = not used)
 }
+SECRET_SETTINGS = {"dataforsyningen_token"}       # shown masked, never sent back in full
 
 SETTING_TYPES = {"bed_x_mm": float, "bed_y_mm": float, "nozzle_mm": float, "default_preset": str, "dem": str,
-                 "overpass_servers": list, "vulcan_auto": bool, "language": str, "keep_builds": int, "export_dir": str}
+                 "overpass_servers": list, "vulcan_auto": bool, "language": str, "keep_builds": int, "export_dir": str, "dataforsyningen_token": str}
 
 
 @dataclass

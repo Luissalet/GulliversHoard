@@ -63,3 +63,19 @@ def test_analyse_flags_thin_things():
     assert report["trees"]["thin_crowns"] == 1
     assert report["layers"]["roads"]["thin_area_mm2"] > 0
     assert report["score"] < 100
+
+
+def test_advice_comes_with_parameter_fixes():
+    thin_building = box(0, 0, 0.5, 6)
+    fake = SimpleNamespace(
+        parts={"buildings": S.prism(thin_building, 0, 1)},
+        footprints={"buildings": [thin_building, box(10, 10, 14, 14)], "roads": box(0, 20, 30, 20.4), "trees": ([[1, 1], [2, 2]], [0.2, 1.5])},
+        params=SimpleNamespace(color="color", min_road_mm=0.5, water_depth_mm=0.8, base_mm=1.0, min_building_mm2=0.6,
+                               tree_size_mm=0.5, resolution_mm=0.35, thicken=False))
+    fixes = {f["param"]: f for f in P.analyse(fake)["fixes"]}
+    assert "base_mm" not in fixes                                      # 1 mm is already over four layers
+    assert "min_building_mm2" not in fixes                             # a thin building is widened, not dropped
+    assert fixes["tree_size_mm"]["to"] >= 1.0
+    assert fixes["thicken"] == {"param": "thicken", "from": False, "to": True}     # the thin streets
+    for f in fixes.values():
+        assert f["to"] > f["from"]

@@ -21,7 +21,7 @@ from .jobs import Job, Jobs
 from .mesh.build import PALETTES, PART_COLORS, PART_LABELS, build
 from .worker import run_isolated
 from .outputs import write_outputs
-from .params import MAX_CELLS, PRESETS, ModelParams, suggest_tiles, NULLABLE
+from .params import MAX_CELLS, PRESETS, ModelParams, suggest_panels, suggest_tiles, NULLABLE
 from .projects import Projects, new_id
 from .sources import Sources
 from .sources import dem as dem_mod
@@ -37,6 +37,8 @@ RANK_NAMES = {0: "none", 1: "motorways", 2: "main roads", 3: "+ local through ro
 def model_ref(pid: str) -> str:
     return f"hoard://{APP_ID}/model/{pid}"
 
+
+MASK = "••••••"                 # a secret setting that is set, as the interface sees it
 
 class Services:
     def __init__(self, config: Config, *, sources: Any = None):
@@ -105,8 +107,12 @@ class Services:
         """What a build would make, without building: scale, size, mesh, tiles for the bed, sources, warnings."""
         s = self.settings.get()
         w, h = params.model_size_mm
-        frame = 2 * params.frame_mm
-        tiles_needed = suggest_tiles(w + frame, h + frame, s["bed_x_mm"], s["bed_y_mm"])
+        fr = params.effective_frame_mm()
+        panels = params.panels_x * params.panels_y > 1
+        if panels:                                      # framed panels: the split is in panels, each with its own frame
+            tiles_needed = suggest_panels(w, h, fr, s["bed_x_mm"], s["bed_y_mm"])
+        else:
+            tiles_needed = suggest_tiles(w + 2 * fr, h + 2 * fr, s["bed_x_mm"], s["bed_y_mm"])
         tw, th = params.tile_size_mm()
         fits = (tw <= s["bed_x_mm"] and th <= s["bed_y_mm"]) or (th <= s["bed_x_mm"] and tw <= s["bed_y_mm"])
         bbox = params.area.bbox
@@ -129,7 +135,10 @@ class Services:
         if params.resolution_mm < s["nozzle_mm"] * 0.5:
             warnings.append({"code": "fine_resolution", "es": "Celdas mucho más finas que la boquilla: más tiempo y archivos grandes sin ganar detalle.",
                              "en": "Cells much finer than the nozzle: more time and bigger files for no detail."})
-        if not fits:
+        if not fits and panels:
+            warnings.append({"code": "bed", "es": f"Cada cuadro no cabe en la cama: usa al menos {tiles_needed[0]}×{tiles_needed[1]} cuadros.",
+                             "en": f"Each panel does not fit the bed: use at least {tiles_needed[0]}×{tiles_needed[1]} panels."})
+        elif not fits:
             warnings.append({"code": "bed", "es": f"No cabe en la cama: usa al menos {tiles_needed[0]}×{tiles_needed[1]} piezas.",
                              "en": f"It does not fit the bed: use at least {tiles_needed[0]}×{tiles_needed[1]} tiles."})
         if params.area.km2 > 400 and params.buildings:
@@ -148,7 +157,10 @@ class Services:
             "tiles": [params.tiles_x, params.tiles_y],
             "tile_mm": [round(tw, 1), round(th, 1)],
             "fits_bed": fits,
-            "suggested_tiles": list(tiles_needed),
+            "suggested_tiles": None if panels else list(tiles_needed),
+            "suggested_panels": list(tiles_needed) if panels else None,
+            "panels": [params.panels_x, params.panels_y],
+            "frame_mm": round(fr, 1),
             "bed_mm": [s["bed_x_mm"], s["bed_y_mm"]],
             "dem": dem_text,
             "roads": RANK_NAMES[params.effective_road_rank()],
@@ -234,13 +246,16 @@ class Services:
                 report = run_isolated(job, {"params": p.model_dump(), "name": current["name"], "folder": str(folder),
                                             "bed": [settings["bed_x_mm"], settings["bed_y_mm"]], "lang": lang,
                                             "cache_dir": str(self.config.cache_dir), "servers": settings["overpass_servers"],
+                                            "keys": self.source_keys(),
                                             "fake": self.config.fake})
             else:
                 result = build(p, self.sources, progress=job.report, cancelled=job.cancelled, name=current["name"])
                 report = write_outputs(result, folder, name=current["name"], bed=(settings["bed_x_mm"], settings["bed_y_mm"]),
                                        progress=job.report, lang=lang)
             report["build_id"] = build_id
-            self.projects.finish_build(pid, build_id, report, settings["keep_builds"])
+            keep = max(settings["keep_builds"], 2) if current.get("keep_previous") else settings["keep_builds"]
+            self.projects.finish_build(pid, build_id, report, keep, params=p.model_dump())
+            self.projects.update(pid, keep_previous=False)
             self.projects.update(pid, job=None)
             self._announce(pid, current["name"], folder, report, settings)
             job.report(1.0, f"Ready: {report['scale']}, {report['size_mm'][0]:.0f} × {report['size_mm'][1]:.0f} mm")
@@ -267,27 +282,122 @@ class Services:
             self.jobs.cancel(active.id)
         return self.projects.delete(pid)
 
-    def files(self, pid: str) -> dict[str, Any]:
+    def files(self, pid: str, build_id: str = "") -> dict[str, Any]:
         rec = self.projects.get(pid)
-        report = self.projects.report(pid)
+        current = (rec.get("build") or {}).get("id")
+        if build_id == current:
+            build_id = ""
+        report = self.projects.report(pid, build_id)
         if not report:
             raise GulliverError("not_found", "This model has not been built yet.", "Build it with model_build.")
-        folder = self.projects.current_build_dir(pid)
+        folder = self.projects.build_folder(pid, build_id)
         base = f"/api/models/{pid}/files/"
+        q = f"?build={build_id}" if build_id else ""
         files = []
         for kind, name in report["files"].items():
-            files.append({"kind": kind, "name": name, "path": str(folder / name), "url": base + name, "bytes": report["bytes"].get(kind)})
+            files.append({"kind": kind, "name": name, "path": str(folder / name), "url": base + name + q, "bytes": report["bytes"].get(kind)})
         for t in report.get("tiles") or []:
             for kind in ("stl", "3mf"):
-                files.append({"kind": f"tile-{kind}", "tile": t["id"], "name": t[kind], "path": str(folder / t[kind]), "url": base + t[kind]})
-        return {"model_id": pid, "name": rec["name"], "folder": str(folder), "files": files}
+                files.append({"kind": f"tile-{kind}", "tile": t["id"], "name": t[kind], "path": str(folder / t[kind]), "url": base + t[kind] + q})
+        return {"model_id": pid, "name": rec["name"], "build_id": build_id or current, "current": not build_id,
+                "folder": str(folder), "files": files}
 
-    def export_copy(self, pid: str, folder: str = "", what: str = "all") -> dict[str, Any]:
-        info = self.files(pid)
+    # -- builds: history, comparison, printability fixes ---------------------------------------------------------------------
+    def builds(self, pid: str) -> dict[str, Any]:
+        rec = self.projects.get(pid)
+        out = []
+        for h in self.projects.builds(pid):
+            q = "" if h["current"] else f"&build={h['id']}"
+            out.append({**h, "thumb_url": f"/api/models/{pid}/files/thumb.png?b={h['id']}{q}"})
+        return {"model_id": pid, "name": rec["name"], "builds": out}
+
+    def compare_builds(self, pid: str, a: str = "", b: str = "") -> dict[str, Any]:
+        """Two kept builds side by side (default: the one before the current, and the current): the parameters that differ,
+        the numbers (size, weight, triangles, buildings, tiles, printability score) and the parts added or gone."""
+        kept = self.projects.builds(pid)
+        if len(kept) < 2 and not (a and b):
+            raise GulliverError("not_found", "This model has only one build to compare.",
+                                "Change something and rebuild: the previous build is kept (keep_builds).")
+        by_id = {h["id"]: h for h in kept}
+        cur = next((h["id"] for h in kept if h["current"]), kept[0]["id"] if kept else "")
+        b = b or cur
+        a = a or next((h["id"] for h in kept if h["id"] != b), "")
+        for x in (a, b):
+            if x not in by_id:
+                raise GulliverError("not_found", f"No kept build {x!r}.", "List them with model_builds.")
+        A, B = by_id[a], by_id[b]
+        pa, pb = A.get("params") or {}, B.get("params") or {}
+        changed = [{"param": k, "a": pa.get(k), "b": pb.get(k)} for k in sorted(set(pa) | set(pb)) if pa.get(k) != pb.get(k)] \
+            if pa and pb else []
+        ra, rb = self.projects.report(pid, a) or {}, self.projects.report(pid, b) or {}
+
+        def metrics(r: dict[str, Any]) -> dict[str, Any]:
+            size = r.get("size_mm") or [None, None, None]
+            pr = r.get("printability") or {}
+            return {"width_mm": size[0], "depth_mm": size[1], "height_mm": size[2], "weight_g_pla": r.get("weight_g_pla"),
+                    "volume_cm3": r.get("volume_cm3"), "triangles": r.get("triangles"), "buildings": r.get("buildings"),
+                    "tiles": len(r.get("tiles") or []), "score": pr.get("score"), "fits_bed": r.get("fits_bed"),
+                    "watertight": (r.get("check") or {}).get("watertight")}
+
+        ma, mb = metrics(ra), metrics(rb)
+        rows = []
+        for k in ma:
+            va, vb = ma[k], mb[k]
+            delta = round(vb - va, 3) if isinstance(va, (int, float)) and isinstance(vb, (int, float)) and not isinstance(va, bool) else None
+            rows.append({"key": k, "a": va, "b": vb, "delta": delta})
+        parts_a, parts_b = set((ra.get("parts") or {}).keys()), set((rb.get("parts") or {}).keys())
+        sa, sb = ma["score"], mb["score"]
+        better = None if sa is None or sb is None else ("same" if sa == sb else "a" if sa > sb else "b")
+        return {"model_id": pid, "a": {k: A.get(k) for k in ("id", "finished", "current")},
+                "b": {k: B.get(k) for k in ("id", "finished", "current")}, "params_changed": changed,
+                "params_known": bool(pa and pb), "metrics": rows, "parts_added": sorted(parts_b - parts_a),
+                "parts_removed": sorted(parts_a - parts_b), "printability_better": better,
+                "advice_a": (ra.get("printability") or {}).get("advice") or [],
+                "advice_b": (rb.get("printability") or {}).get("advice") or []}
+
+    def use_build(self, pid: str, build_id: str) -> dict[str, Any]:
+        if self.jobs.active_for(pid):
+            raise GulliverError("busy", "The model is building.", "Wait for the build to finish or cancel it.")
+        self.projects.use_build(pid, build_id)
+        return self.describe(self.projects.get(pid), full=True)
+
+    def advice(self, pid: str, *, only: Optional[list[str]] = None, apply: bool = False) -> dict[str, Any]:
+        """The printability fixes of the current build as parameter changes, previewed with area_check (size, mesh, bed);
+        ``apply`` changes the parameters and rebuilds, keeping the current build to compare with."""
+        rec = self.projects.get(pid)
+        report = self.projects.report(pid) or {}
+        fixes = list((report.get("printability") or {}).get("fixes") or [])
+        if only:
+            unknown = sorted(set(only) - {f["param"] for f in fixes})
+            if unknown:
+                raise GulliverError("invalid", f"No printability fix for {', '.join(unknown)}.",
+                                    "Pick from the fixes model_advice lists.")
+            fixes = [f for f in fixes if f["param"] in set(only)]
+        values = {f["param"]: f["to"] for f in fixes}
+        current = ModelParams(**rec["params"])
+        new = self.make_params(values, "", base=rec["params"]) if values else current
+        before, after = self.area_check(current), self.area_check(new)
+        keys = ("model_mm", "tile_mm", "tiles", "fits_bed", "cells", "triangles_estimate", "frame_mm")
+        preview = {"before": {k: before.get(k) for k in keys}, "after": {k: after.get(k) for k in keys},
+                   "warnings": after["warnings"]}
+        out = {"model_id": pid, "fixes": fixes, "advice": (report.get("printability") or {}).get("advice") or [],
+               "score": (report.get("printability") or {}).get("score"), "preview": preview, "applied": False}
+        if apply:
+            if not values:
+                raise GulliverError("invalid", "There is nothing to fix in this build.")
+            self.projects.update(pid, params=new.model_dump(), keep_previous=True)   # the build being fixed stays to compare
+            out["job"] = self.start_build(pid)
+            out["applied"] = True
+        return out
+
+    def export_copy(self, pid: str, folder: str = "", what: str = "all", build_id: str = "") -> dict[str, Any]:
+        info = self.files(pid, build_id)
         target = Path(folder or self.settings["export_dir"] or (Path.home() / "Desktop" / "Gulliver")).expanduser()
         if not target.is_absolute():
             raise GulliverError("invalid", "The folder must be an absolute path.")
         safe_name = "".join(c if c.isalnum() or c in " -_.,()" else "_" for c in info["name"]).strip() or pid
+        if not info["current"]:
+            safe_name += f" ({info['build_id']})"
         target = target / safe_name
         target.mkdir(parents=True, exist_ok=True)
         kinds = {"all": None, "model": {"stl", "3mf"}, "tiles": {"tiles_zip", "tile-stl", "tile-3mf"}, "stl": {"stl", "tile-stl"},
@@ -328,11 +438,27 @@ class Services:
                 "parts": {n: {"color": PART_COLORS[n], "label_es": PART_LABELS[n][0], "label_en": PART_LABELS[n][1]} for n in PART_COLORS},
                 "palettes": PALETTES}
 
-    def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
-        out = self.settings.update(changes)
-        if "overpass_servers" in changes and hasattr(self.sources, "overpass_servers"):
-            self.sources.overpass_servers = list(out["overpass_servers"])
+    def public_settings(self) -> dict[str, Any]:
+        """The settings as shown to the interface and the tools: secrets masked (only whether they are set)."""
+        from .config import SECRET_SETTINGS
+        out = self.settings.get()
+        for k in SECRET_SETTINGS:
+            out[k] = MASK if out.get(k) else ""
         return out
+
+    def source_keys(self) -> dict[str, str]:
+        s = self.settings.get()
+        return {"dataforsyningen": s.get("dataforsyningen_token") or ""}
+
+    def update_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        from .config import SECRET_SETTINGS
+        changes = {k: v for k, v in changes.items() if not (k in SECRET_SETTINGS and v == MASK)}   # the mask is "unchanged"
+        self.settings.update(changes)
+        if "overpass_servers" in changes and hasattr(self.sources, "overpass_servers"):
+            self.sources.overpass_servers = list(self.settings["overpass_servers"])
+        if hasattr(self.sources, "keys"):
+            self.sources.keys = self.source_keys()
+        return self.public_settings()
 
     def cache_info(self) -> dict[str, Any]:
         return self.fetcher.cache_size()

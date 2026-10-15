@@ -1,7 +1,7 @@
 """Routes for the bundled web UI and for programs that only read (Faustus, the hub).
 
 Every write and most reads go through ``POST /api/ui/call`` with ``{name, arguments}`` (the same tool handlers the assistant
-uses, uncapped). File bytes travel on ``GET /api/models/{id}/files/{name}`` (the current build; ``?download=1`` as an
+uses, uncapped). File bytes travel on ``GET /api/models/{id}/files/{name}`` (the current build, or ``?build=<id>`` a kept one; ``?download=1`` as an
 attachment); ``GET /api/events`` is what the pages poll for job progress."""
 
 from __future__ import annotations
@@ -61,8 +61,8 @@ def models(request: Request):
 
 
 @router.get("/models/{model_id}/files/{name:path}")
-def model_file(request: Request, model_id: str, name: str, download: bool = False):
-    path = services(request).projects.file(model_id, name)
+def model_file(request: Request, model_id: str, name: str, download: bool = False, build: str = ""):
+    path = services(request).projects.file(model_id, name, build)
     ctype = TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"}
     if download:

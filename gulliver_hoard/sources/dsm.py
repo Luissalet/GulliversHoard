@@ -1,7 +1,10 @@
 """Real roof and tower heights from free national surface models (DSM: the top of what a laser scanner saw from the air,
 buildings, spires and trees included), read without any key: WCS 2.0.1 / 1.0.0 and WMS GetMap services of the Netherlands
-(AHN4), France (IGN LiDAR HD), England (Environment Agency), North Rhine-Westphalia, Norway, Poland and Flanders, and the
+(AHN4), France (IGN LiDAR HD), England (Environment Agency), North Rhine-Westphalia, Norway, Poland and Flanders, Spain
+(the IGN's MDS05 and building-height model, plus the finer LiDAR models of Navarra, Gipuzkoa and Cantabria) and the
 Cloud-Optimised GeoTIFFs of swisstopo (swissSURFACE3D, found through its STAC catalogue, newest year of each tile).
+Denmark's surface model (Dataforsyningen) needs a free token: its provider is used only when the caller hands one over
+in ``keys`` (``{"dataforsyningen": "<token>"}``).
 
 ``fetch`` asks the service in its own coordinate system in tiles below its size limit (at its native resolution, or coarser
 where the service can scale), puts every tile onto one regular lon/lat grid of about ``res_m`` metres (keeping the highest
@@ -36,6 +39,11 @@ def _poly(*pts: tuple[float, float]) -> Any:
     return Polygon(pts)
 
 
+def _multi(*parts: Any) -> Any:
+    from shapely.geometry import MultiPolygon
+    return MultiPolygon(parts)
+
+
 @dataclass(frozen=True, eq=False)
 class Provider:
     """One free surface model. ``kind`` picks how it is asked: ``wcs2`` (WCS 2.0.1 KVP), ``wcs1`` (WCS 1.0.0 with a pixel
@@ -59,6 +67,8 @@ class Provider:
     nodata: tuple[float, ...] = ()
     zero_is_nodata: bool = False
     licence: str = ""
+    needs_key: str = ""                        # name of the key the caller must hand over in ``keys`` (else not used)
+    key_param: str = "token"                   # query parameter that carries that key
 
     def covers(self, lon: float, lat: float) -> bool:
         from shapely.geometry import Point
@@ -122,22 +132,73 @@ PROVIDERS: dict[str, Provider] = {p.key: p for p in (
               (20.5, 69.05), (18.0, 68.4), (15.5, 66.2), (13.5, 64.5), (12.2, 63.0), (12.0, 61.0), (12.5, 60.0), (11.7, 59.0),
               (8.0, 58.0)),
         layer="las_dom", fmt="GeoTIFF", scalable=True, tile_px=2000, zero_is_nodata=True, licence="Kartverket (NLOD)"),
+    Provider(
+        "dk", "Danmarks Højdemodel, overflade (DHM)", "Dinamarca",
+        "Modelo de superficies DHM © Klimadatastyrelsen / Dataforsyningen (datos abiertos)", "wcs1",
+        "https://api.dataforsyningen.dk/dhm_wcs_DAF", 25832, 0.4,
+        _poly((8.0, 54.85), (8.0, 56.9), (8.6, 57.3), (10.0, 57.8), (10.7, 57.5), (10.95, 56.5), (12.4, 56.35), (12.9, 55.9),
+              (12.8, 55.3), (11.9, 54.85), (10.9, 54.75), (9.8, 54.8)),
+        layer="dhm_overflade", fmt="GTiff", scalable=True, tile_px=1000, nodata=(-9999.0,), licence="Dataforsyningen (CC BY 4.0)",
+        needs_key="dataforsyningen"),
+    Provider(
+        "es_nav", "IDENA, MDS LiDAR 2 m (Navarra)", "Navarra",
+        "Modelo de superficies LiDAR © Gobierno de Navarra, IDENA (CC BY 4.0)", "wcs2",
+        "https://idena.navarra.es/ogc/wcs", 25830, 2.0,
+        _poly((-2.52, 42.62), (-2.05, 42.78), (-2.05, 43.02), (-1.8, 43.28), (-1.45, 43.32), (-1.25, 43.1), (-0.75, 42.9),
+              (-0.72, 42.6), (-1.0, 42.35), (-1.0, 41.95), (-1.55, 41.9), (-1.85, 42.15), (-2.2, 42.35)),
+        layer="IDENA.WCS__ELEVAC_Ras_MDS_2M", ndsm_layer="IDENA.WCS__ELEVAC_Ras_Alturas_2M", axes=("E", "N"), scalable=True,
+        tile_px=1500, licence="CC BY 4.0"),                  # the service refuses answers over 10 MB
+    Provider(
+        "es_gip", "Gipuzkoa LiDAR 2017, modelo de vuelo 1 m", "Gipuzkoa",
+        "Modelo de superficies LiDAR 2017 © Diputación Foral de Gipuzkoa (datos abiertos)", "wcs1",
+        "https://b5m.gipuzkoa.eus/ogc/wcs/gipuzkoa_wcs", 25830, 1.0,
+        _poly((-2.55, 43.03), (-2.25, 42.93), (-1.95, 42.93), (-1.75, 43.1), (-1.8, 43.3), (-1.9, 43.37), (-2.3, 43.4), (-2.55, 43.3)),
+        layer="LIDAR 2017: Hegaldi eredua-Modelo de vuelo-Digital Surface Model", fmt="GEOTIFFFLOAT32", scalable=True,
+        tile_px=2000, nodata=(-9999.0,), licence="datos abiertos de la Diputación Foral de Gipuzkoa"),
+    Provider(
+        "es_cant", "Cantabria MDS LiDAR 2018-19 1 m (edificios, sin vegetación)", "Cantabria",
+        "Modelo de superficies LiDAR 2018-19 © Gobierno de Cantabria / IGN-CNIG (datos abiertos)", "wcs1",
+        "https://geoservicios.cantabria.es/inspire/services/MDT/MapServer/WCSServer", 25830, 1.0,
+        _poly((-4.85, 43.4), (-4.5, 43.48), (-3.8, 43.55), (-3.4, 43.46), (-3.15, 43.4), (-3.15, 43.1), (-3.65, 42.95),
+              (-4.3, 42.95), (-4.75, 43.05)),
+        layer="23", fmt="GeoTIFF", scalable=True, tile_px=2000, licence="datos abiertos del Gobierno de Cantabria"),
+    Provider(
+        "es", "IGN, MDS05 y MDSn de edificación (España)", "España",
+        "Modelo de superficies de PNOA-LiDAR © Instituto Geográfico Nacional (CC BY 4.0 scne.es)", "wcs2",
+        "https://wcs-mds.idee.es/mds", 25830, 2.5,
+        _multi(
+            _poly((-9.5, 43.3), (-8.0, 43.9), (-4.0, 43.6), (-1.8, 43.45), (-1.3, 43.1), (0.7, 42.9), (3.3, 42.5), (3.5, 41.9),
+                  (2.8, 41.5), (2.3, 41.2), (1.0, 40.8), (0.3, 40.2), (-0.2, 39.5), (0.3, 38.8), (-0.7, 37.6), (-2.2, 36.6),
+                  (-4.4, 36.5), (-5.5, 35.9), (-6.5, 36.6), (-7.5, 37.1), (-7.5, 38.1), (-6.9, 39.0), (-7.4, 39.7), (-6.8, 40.2),
+                  (-6.9, 41.0), (-6.5, 41.6), (-6.6, 42.0), (-8.2, 42.1), (-8.9, 41.9), (-9.3, 42.6)),
+            _poly((2.2, 39.2), (3.6, 39.2), (3.6, 40.0), (2.2, 40.0)),          # Mallorca
+            _poly((3.7, 39.75), (4.4, 39.75), (4.4, 40.15), (3.7, 40.15)),      # Menorca
+            _poly((1.1, 38.55), (1.7, 38.55), (1.7, 39.2), (1.1, 39.2))),       # Ibiza and Formentera
+        layer="mds05", ndsm_layer="mdsn_e025", scalable=True, tile_px=1800, nodata=(-32768.0, -9999.0),
+        licence="CC BY 4.0 (scne.es)"),
 )}
 
 
-def providers_for(bbox: tuple[float, float, float, float]) -> list[Provider]:
-    """Every provider that covers the middle of ``bbox`` (best first), then those that cover only a corner."""
+def _usable(p: Provider, keys: Optional[dict[str, str]]) -> bool:
+    return not p.needs_key or bool((keys or {}).get(p.needs_key))
+
+
+def providers_for(bbox: tuple[float, float, float, float], keys: Optional[dict[str, str]] = None) -> list[Provider]:
+    """Every provider that covers the middle of ``bbox`` (best first: the finer regional models of a country come before
+    its national one), then those that cover only a corner. A provider that needs a key (Denmark: ``"dataforsyningen"``)
+    is left out unless ``keys`` has a non-empty value for it."""
     lon0, lat0, lon1, lat1 = bbox
     cx, cy = (lon0 + lon1) / 2.0, (lat0 + lat1) / 2.0
-    first = [p for p in PROVIDERS.values() if p.covers(cx, cy)]
+    pool = [p for p in PROVIDERS.values() if _usable(p, keys)]
+    first = [p for p in pool if p.covers(cx, cy)]
     corners = [(lon0, lat0), (lon0, lat1), (lon1, lat0), (lon1, lat1)]
-    rest = [p for p in PROVIDERS.values() if p not in first and any(p.covers(x, y) for x, y in corners)]
+    rest = [p for p in pool if p not in first and any(p.covers(x, y) for x, y in corners)]
     return first + rest
 
 
-def provider_for(bbox: tuple[float, float, float, float]) -> Optional[Provider]:
-    """The provider for the area (the one covering its centre), or None: Madrid, the Amazon, most of the world."""
-    found = providers_for(bbox)
+def provider_for(bbox: tuple[float, float, float, float], keys: Optional[dict[str, str]] = None) -> Optional[Provider]:
+    """The provider for the area (the one covering its centre), or None: the Amazon, most of the world."""
+    found = providers_for(bbox, keys)
     return found[0] if found else None
 
 
@@ -222,29 +283,34 @@ def _clean(arr: np.ndarray, p: Provider) -> np.ndarray:
     return arr
 
 
-def _request(p: Provider, ndsm: bool, box: tuple[float, float, float, float], step: float) -> tuple[dict, str]:
-    """Query parameters of one tile ``box`` = (x0, y0, x1, y1) in the provider's coordinates, pixels ``step`` wide."""
+def _request(p: Provider, ndsm: bool, box: tuple[float, float, float, float], step: float,
+             keys: Optional[dict[str, str]] = None) -> tuple[dict, str]:
+    """Query parameters of one tile ``box`` = (x0, y0, x1, y1) in the provider's coordinates, pixels ``step`` wide. The key
+    of a provider that needs one goes in as the query parameter ``p.key_param``."""
     x0, y0, x1, y1 = box
     layer = p.ndsm_layer if (ndsm and p.ndsm_layer) else p.layer
     w = max(1, int(round((x1 - x0) / step)))
     h = max(1, int(round((y1 - y0) / step)))
+    secret = {p.key_param: (keys or {})[p.needs_key]} if p.needs_key else {}
     if p.kind == "wms":
         return {"SERVICE": "WMS", "VERSION": "1.3.0", "REQUEST": "GetMap", "LAYERS": layer, "STYLES": "", "CRS": f"EPSG:{p.crs}",
-                "BBOX": f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}", "WIDTH": w, "HEIGHT": h, "FORMAT": p.fmt}, p.url
+                "BBOX": f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}", "WIDTH": w, "HEIGHT": h, "FORMAT": p.fmt, **secret}, p.url
     if p.kind == "wcs1":
         return {"SERVICE": "WCS", "VERSION": "1.0.0", "REQUEST": "GetCoverage", "COVERAGE": layer, "CRS": f"EPSG:{p.crs}",
-                "BBOX": f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}", "WIDTH": w, "HEIGHT": h, "FORMAT": p.fmt}, p.url
+                "BBOX": f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}", "WIDTH": w, "HEIGHT": h, "FORMAT": p.fmt, **secret}, p.url
     fmt = "%.8f" if p.crs == 4258 else "%.3f"
     params: dict[str, Any] = {
         "SERVICE": "WCS", "VERSION": "2.0.1", "REQUEST": "GetCoverage", "COVERAGEID": layer, "FORMAT": p.fmt,
         "SUBSET": [f"{p.axes[0]}({fmt % x0},{fmt % x1})", f"{p.axes[1]}({fmt % y0},{fmt % y1})"]}
     if p.scalable and step > p.native_m * 1.05:
         params["SCALEFACTOR"] = f"{p.native_m / step:.4f}"
+    params.update(secret)
     return params, p.url
 
 
-def _fetch_tile(fetcher: Fetcher, p: Provider, ndsm: bool, box: tuple[float, float, float, float], step: float):
-    params, url = _request(p, ndsm, box, step)
+def _fetch_tile(fetcher: Fetcher, p: Provider, ndsm: bool, box: tuple[float, float, float, float], step: float,
+                keys: Optional[dict[str, str]] = None):
+    params, url = _request(p, ndsm, box, step, keys)
     for attempt in (1, 2):                                   # some of these servers drop a connection now and then
         try:
             data = fetcher.get(url, params=params, bucket="dsm", ext=".tif", accept=lambda r: not _is_error(r))
@@ -322,7 +388,7 @@ def _tile_boxes(box: tuple[float, float, float, float], tile_m: float) -> list[t
 
 
 def _fill_service(fetcher: Fetcher, p: Provider, ndsm: bool, bbox: tuple[float, float, float, float], res_m: float,
-                  grid: _Grid, progress: Optional[Callable[[str], None]]) -> None:
+                  grid: _Grid, progress: Optional[Callable[[str], None]], keys: Optional[dict[str, str]] = None) -> None:
     from rasterio.warp import transform_bounds
 
     nb = transform_bounds("EPSG:4326", f"EPSG:{p.crs}", *bbox, densify_pts=21)
@@ -341,7 +407,7 @@ def _fill_service(fetcher: Fetcher, p: Provider, ndsm: bool, bbox: tuple[float, 
         boxes = _tile_boxes(box, p.tile_px * step)
         step_u = step
     for i, b in enumerate(boxes):
-        arr, transform, crs = _fetch_tile(fetcher, p, ndsm, b, step_u)
+        arr, transform, crs = _fetch_tile(fetcher, p, ndsm, b, step_u, keys)
         if np.isfinite(arr).any():
             grid.add(arr, transform, crs, b)
         if progress:
@@ -389,12 +455,13 @@ def _fill_stac(fetcher: Fetcher, p: Provider, bbox: tuple[float, float, float, f
 
 
 def fetch(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, res_m: float = 1.0,
-          progress: Optional[Callable[[str], None]] = None, ndsm: bool = False, provider: Optional[Provider] = None
-          ) -> tuple[np.ndarray, tuple[float, float, float, float], str, bool]:
+          progress: Optional[Callable[[str], None]] = None, ndsm: bool = False, provider: Optional[Provider] = None,
+          keys: Optional[dict[str, str]] = None) -> tuple[np.ndarray, tuple[float, float, float, float], str, bool]:
     """``(heights, bounds, attribution, is_ndsm)`` over ``bbox`` = (lon0, lat0, lon1, lat1): float32 metres, rows north to
     south, NaN where the model has no data; ``bounds`` = (lon0, lat0, lon1, lat1) of the array. ``is_ndsm`` is True when the
-    values are already heights above the ground (only with ``ndsm=True`` on a provider that has such a layer, France).
-    Several providers that overlap the area are tried in turn until one has data."""
+    values are already heights above the ground (only with ``ndsm=True`` on a provider that has such a layer: France,
+    Navarra, Spain's national model). Several providers that overlap the area are tried in turn until one has data.
+    ``keys`` = ``{"dataforsyningen": "<token>"}`` switches on the providers that need a key (Denmark)."""
     lon0, lat0, lon1, lat1 = bbox
     if not (lon1 > lon0 and lat1 > lat0):
         raise GulliverError("invalid", "The area is empty.", "Give an area with a positive width and height.")
@@ -402,7 +469,10 @@ def fetch(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, res_m: f
     if area_km2 > MAX_AREA_KM2:
         raise GulliverError("too_large", f"The area ({area_km2:.0f} km²) is too large to read real building heights.",
                             f"Use an area of at most {MAX_AREA_KM2:.0f} km².")
-    candidates = [provider] if provider else providers_for(bbox)
+    if provider is not None and not _usable(provider, keys):
+        raise GulliverError("unavailable", f"The surface model of {provider.country} needs a free key ({provider.needs_key}).",
+                            "Add the key in the settings.")
+    candidates = [provider] if provider else providers_for(bbox, keys)
     if not candidates:
         raise GulliverError("unavailable", "There is no free surface model for this area.",
                             "Building heights will come from the map's own height tags and floor counts.")
@@ -427,8 +497,11 @@ def fetch(fetcher: Fetcher, bbox: tuple[float, float, float, float], *, res_m: f
             if p.kind == "stac":
                 _fill_stac(fetcher, p, bbox, grid, progress)
             else:
-                _fill_service(fetcher, p, use_ndsm, bbox, grid.dlat * M_PER_DEG, grid, progress)
+                _fill_service(fetcher, p, use_ndsm, bbox, grid.dlat * M_PER_DEG, grid, progress, keys)
         except GulliverError as exc:
+            if p.needs_key and exc.details.get("status_code") in (401, 403):
+                exc = GulliverError("source_failed", f"The key for {p.country} ({p.needs_key}) was refused.",
+                                    "Check the key in the settings.")
             last = exc
             continue
         except Exception as exc:  # noqa: BLE001 - a read failure: the next provider, or the build carries on without

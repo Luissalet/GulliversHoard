@@ -17,7 +17,9 @@ Gulliver's Hoard builds models from open data. Credit these sources when you sha
 - Building heights from laser surface models (where open): AHN4 © Rijkswaterstaat (CC0, Netherlands); LiDAR HD © IGN France
   (Licence Ouverte); LIDAR Composite DSM © Environment Agency (Open Government Licence, England); DOM © Geobasis NRW
   (dl-de/zero-2.0); swissSURFACE3D Raster © swisstopo (OGD); DSM © Digitaal Vlaanderen (Flanders); DOM © Kartverket /
-  Geonorge (Norway); NMPT © GUGiK (Poland)
+  Geonorge (Norway); NMPT © GUGiK (Poland); MDS PNOA-LiDAR © Instituto Geográfico Nacional (CC BY 4.0 scne.es, Spain);
+  LiDAR DSM © Gobierno de Navarra, IDENA (CC BY 4.0); LiDAR 2017 © Diputación Foral de Gipuzkoa (open data); LiDAR 2018-19
+  © Gobierno de Cantabria / IGN-CNIG; DHM © Klimadatastyrelsen / Dataforsyningen (Denmark, with the user's own token)
 - Elevation elsewhere: Terrain Tiles (Mapzen / Amazon Web Services Open Data), built from SRTM, EU-DEM, USGS 3DEP,
   ETOPO1 and other sources, each under its own terms — https://registry.opendata.aws/terrain-tiles/
 - Base maps shown in the interface (display only): OpenStreetMap, OpenTopoMap (CC-BY-SA), PNOA © IGN España, Esri World Imagery.

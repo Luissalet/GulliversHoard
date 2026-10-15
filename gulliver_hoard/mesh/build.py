@@ -25,7 +25,7 @@ from shapely.ops import unary_union
 
 from ..errors import Cancelled, GulliverError
 from ..geo import format_coord, nice_scale
-from ..params import MAX_CELLS, ModelParams
+from ..params import MAX_CELLS, PANEL_FRAME_MM, PLAQUE_FRAME_MM, ModelParams  # noqa: F401 (frame widths re-exported)
 from ..sources import aerial as aerial_mod
 from ..sources import canopy as canopy_mod
 from ..sources import catastro as catastro_mod
@@ -128,10 +128,9 @@ WATER_REACH_M = 150.0         # the water level at a point is never above the lo
 LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
-STAGE_VERSION = 5             # bump when the gathered map data changes shape
+TERRAIN_TOL_MM = 0.02         # how far the simplified terrain may stray from the elevation grid
+STAGE_VERSION = 6             # bump when the gathered map data changes shape
 STAGE_MAX_AGE_S = 7 * 86400
-PLAQUE_FRAME_MM = 14.0
-PANEL_FRAME_MM = 8.0          # frame of each panel when the model is split into framed panels and no frame was asked        # narrowest frame that carries a plaque
 PLAQUE_MM = 0.6               # the plaque's letters stand this high (and sink as deep into the frame)
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
 
@@ -594,20 +593,25 @@ def _apply_dsm(feats: Any, heights: np.ndarray, bounds: tuple[float, float, floa
     for b, h in zip(outlines, found):
         if not h or not h.get("roof_m") or h["roof_m"] < 2.5:
             continue
-        b.height_m = float(h["roof_m"])
-        b.estimated = False
-        n += 1
+        roof = float(h["roof_m"])
+        # a height already known (cadastral floors, a mapped height) wins over the surface model, which can be years old
+        # or blurred: only a roof far above it (a block grown since) replaces it. Towers are added either way.
+        keep = not b.estimated and b.height_m and roof <= b.height_m * 1.25 + 3.0
+        if not keep:
+            b.height_m = roof
+            b.estimated = False
+            n += 1
         # a pitched roof shows as metres between the eaves and the ridge: on a house-sized footprint draw it gabled
-        pitch = float(h["roof_m"]) - float(h.get("eaves_m") or h["roof_m"])
-        if b.roof in ("", "flat") and pitch >= 2.0 and b.shape.area <= 600.0 and b.shape.area >= 0.75 * b.shape.minimum_rotated_rectangle.area:
+        pitch = roof - float(h.get("eaves_m") or roof)
+        if not keep and b.roof in ("", "flat") and pitch >= 2.0 and b.shape.area <= 600.0 and b.shape.area >= 0.75 * b.shape.minimum_rotated_rectangle.area:
             b.roof = "gabled"
-            b.roof_height_m = min(pitch * 1.3, float(h["roof_m"]) * 0.6)
+            b.roof_height_m = min(pitch * 1.3, roof * 0.6)
         for poly, top in h.get("towers") or []:
             if top - b.height_m < 4.0 or poly.is_empty:
                 continue
             pointed = poly.area < 80.0 and top - b.height_m > 12.0
             towers.append(osm_mod.Building(poly, float(top), b.height_m, "tower", b.name, False,
-                                           roof="pyramidal" if pointed else "", 
+                                           roof="pyramidal" if pointed else "",
                                            roof_height_m=(top - b.height_m) * 0.45 if pointed else None, part=True))
     feats.buildings.extend(towers)
     return n
@@ -796,7 +800,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         # real heights from a laser surface model where one is open: every roof at its height, towers and spires on top
         dsm_used = 0
         if (p.buildings and p.dsm_heights and feats.buildings and hasattr(sources, "dsm") and area.km2 <= 25.0
-                and dsm_mod.provider_for(area.bbox) is not None and k >= 0.012):
+                and dsm_mod.provider_for(area.bbox, keys=getattr(sources, "keys", None)) is not None and k >= 0.012):
             try:
                 hts, hb, dsm_attr, is_ndsm = sources.dsm(area.bbox_padded(30.0), res_m=1.0 if area.km2 <= 9.0 else 2.0,
                                                         progress=clock.log)
@@ -1013,7 +1017,9 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # roads and contour lines are cut from the solid along their real outlines (never stepped along the grid): the cut is
     # the outline's prism above a copy of the terrain lowered by the depth, so the floor follows the ground
     clock.step(0.35, "Terrain solid")
-    terrain = S.heightfield(Z, xs, ys)
+    # the grid has a triangle pair per cell even where the ground is flat; merged within TERRAIN_TOL_MM (far under a printed
+    # layer) a plain loses most of them, and every boolean after this one works on the lighter mesh
+    terrain = S.heightfield(Z, xs, ys).simplify(TERRAIN_TOL_MM)
     top = float(Z.max())
     track_raise = S.EMPTY
     if track_shape is not None:
@@ -1285,6 +1291,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 dropped += 1
                 continue
             shape = shape.simplify(0.03).buffer(0.02, join_style="mitre")   # neighbours overlap instead of touching
+            if p.thicken:
+                shape = printability.thicken(shape, 2.0 * p.nozzle_mm)       # thin wings, sheds and spires get two passes
             if shape.is_empty:
                 continue
             if water_geom is not None and water_geom.contains(shape.representative_point()):
@@ -1598,11 +1606,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     # 11. frame (and its plaque) ---------------------------------------------------------------------------------------------
     outer = footprint
     panels_n = p.panels_x * p.panels_y
-    frame_mm = p.frame_mm
-    if panels_n > 1 and frame_mm <= 0:
-        frame_mm = PANEL_FRAME_MM
-    if p.plaque and frame_mm < PLAQUE_FRAME_MM:
-        frame_mm = PLAQUE_FRAME_MM
+    frame_mm = p.effective_frame_mm()
+    if p.plaque and frame_mm > max(p.frame_mm, PANEL_FRAME_MM if panels_n > 1 else 0.0):
         notes.append(f"The frame was widened to {frame_mm:g} mm to carry the plaque.")
     plaque_drawn = False
     title = (p.plaque_text or name or "").strip() or format_coord(p.lon, p.lat)

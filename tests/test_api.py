@@ -174,3 +174,56 @@ def test_a_build_in_its_own_process_reports_progress_and_finishes(tmp_path):
         assert job["state"] == "done" and any("Terrain solid" in line for line in job["log"])
     finally:
         s.stop()
+
+
+def test_secret_token_is_never_shown_and_reaches_the_sources(call, services):
+    assert call("settings_get")["dataforsyningen_token"] == ""
+    s = call("settings_set", {"dataforsyningen_token": "abc123"})
+    assert s["dataforsyningen_token"] == "••••••" and "abc123" not in str(s)
+    assert "abc123" not in str(call("settings_get"))
+    assert services.source_keys() == {"dataforsyningen": "abc123"}
+    call("settings_set", {"dataforsyningen_token": "••••••", "nozzle_mm": 0.6})   # the mask means "unchanged"
+    assert services.source_keys()["dataforsyningen"] == "abc123"
+    call("settings_set", {"dataforsyningen_token": ""})
+    assert services.source_keys()["dataforsyningen"] == ""
+
+
+def test_bed_check_counts_the_frame_the_build_will_draw(call):
+    # a plaque widens the frame to 14 mm: 240 mm of map + 2 x 14 no longer fits a 256 mm bed in one piece
+    c = call("area_check", {"params": {**DEMO, "size_mm": 240, "plaque": True}})
+    assert c["frame_mm"] == 14 and c["tile_mm"][0] == 268 and not c["fits_bed"] and c["suggested_tiles"] == [2, 1]
+    # framed panels get 8 mm each even with no frame asked, and the advice is in panels
+    p = call("area_check", {"params": {**DEMO, "size_mm": 500, "panels_x": 2, "panels_y": 1}})
+    assert p["frame_mm"] == 8 and p["tile_mm"][0] == 266 and not p["fits_bed"]
+    assert p["suggested_tiles"] is None and p["suggested_panels"][0] * p["suggested_panels"][1] >= 3
+    assert "cuadros" in next(w["es"] for w in p["warnings"] if w["code"] == "bed")
+
+
+def test_builds_are_kept_compared_restored_and_fixed(call, client):
+    m = create(call, water_depth_mm=0.2)                             # water too shallow to see: printability has a fix
+    first = call("model_get", {"model_id": m["id"]})["build"]["id"]
+    adv = call("model_advice", {"model_id": m["id"]})
+    assert not adv["applied"] and any(f["param"] == "water_depth_mm" and f["to"] >= 0.4 for f in adv["fixes"])
+    assert adv["preview"]["before"]["model_mm"] == adv["preview"]["after"]["model_mm"]
+    assert call("model_advice", {"model_id": m["id"], "only": ["nope"]}, status=400)["code"] == "invalid"
+    done = call("model_advice", {"model_id": m["id"], "only": ["water_depth_mm"], "apply": True})
+    assert done["applied"] and done["job"]
+    rec = call("model_get", {"model_id": m["id"]})
+    assert rec["status"] == "ready" and rec["params"]["water_depth_mm"] >= 0.4 and rec["build"]["id"] != first
+    builds = call("model_builds", {"model_id": m["id"]})["builds"]
+    assert [b["current"] for b in builds] == [True, False] and builds[1]["id"] == first
+    assert builds[0]["params"]["water_depth_mm"] >= 0.4 and builds[1]["params"]["water_depth_mm"] == 0.2
+    cmp = call("model_compare", {"model_id": m["id"]})
+    assert cmp["a"]["id"] == first and cmp["b"]["current"]
+    assert [c["param"] for c in cmp["params_changed"]] == ["water_depth_mm"]
+    vol = next(r for r in cmp["metrics"] if r["key"] == "volume_cm3")
+    assert vol["a"] and vol["b"] and vol["delta"] is not None and cmp["printability_better"] in ("a", "b", "same")
+    # the files of the earlier build are still served, and can be exported
+    old = call("model_files", {"model_id": m["id"], "build_id": first})
+    assert not old["current"] and all("build=" + first in f["url"] for f in old["files"])
+    assert client.get(next(f["url"] for f in old["files"] if f["kind"] == "stl")).status_code == 200
+    assert client.get(f"/api/models/{m['id']}/files/model.stl?build=zzzzzz9").status_code == 404
+    # back to the first build: it becomes current with its parameters
+    back = call("model_build_use", {"model_id": m["id"], "build_id": first})
+    assert back["build"]["id"] == first and back["params"]["water_depth_mm"] == 0.2
+    assert call("model_build_use", {"model_id": m["id"], "build_id": "zzzzzz9"}, status=404)["code"] == "not_found"

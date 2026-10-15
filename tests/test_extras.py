@@ -59,6 +59,7 @@ def test_street_seams_and_thickening():
     res = build(make(tiles_x=2, tiles_y=2, tile_cuts="streets", thicken=True), FakeSources())
     assert len(res.tiles) == 4 and not all_closed(res)
     assert res.stats["printability"]["score"] >= 0
+    assert res.stats["printability"]["buildings"]["thin_walls"] == 0      # thin buildings are widened to two passes
 
 
 def test_surface_model_heights(monkeypatch):
@@ -83,7 +84,7 @@ def test_surface_model_heights(monkeypatch):
     grid[(abs(X - 320) < 5) & (abs(Y + 300) < 5)] = 60.0
     monkeypatch.setattr(src, "dsm", lambda bbox, res_m=1.0, progress=None: (grid, (bbox[0], bbox[3] - h * res_lat,
                                                                                    bbox[0] + w * lon_res, bbox[3]), "Test DSM", True), raising=False)
-    monkeypatch.setattr(dsm_mod, "provider_for", lambda bbox: object())
+    monkeypatch.setattr(dsm_mod, "provider_for", lambda bbox, keys=None: object())
     res = build(make(), src)
     assert res.stats["dsm_buildings"] > 50
     assert "Test DSM" in res.attribution and not all_closed(res)

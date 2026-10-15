@@ -38,10 +38,11 @@ async function request(method, path, { params, body } = {}) {
 // Every write and most reads go through the same tool handlers the assistant uses.
 const call = (name, args) => request("POST", "/api/ui/call", { body: { name, arguments: args || {} } });
 
-export const fileUrl = (modelId, name, { download = false, build = "" } = {}) => {
+export const fileUrl = (modelId, name, { download = false, build = "", kept = "" } = {}) => {
   const q = new URLSearchParams();
   if (download) q.set("download", "1");
   if (build) q.set("b", build);
+  if (kept) q.set("build", kept);   // a kept earlier build instead of the current one
   const qs = q.toString();
   return `/api/models/${encodeURIComponent(modelId)}/files/${name.split("/").map(encodeURIComponent).join("/")}${qs ? `?${qs}` : ""}`;
 };

@@ -24,6 +24,9 @@ Palette = Literal["classic", "sand", "grey", "white", "alpine"]
 TileCuts = Literal["straight", "streets"]
 
 
+PLAQUE_FRAME_MM = 14.0       # narrowest frame that carries a plaque
+PANEL_FRAME_MM = 8.0         # frame of each framed panel when no frame was asked
+
 class ModelParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -198,13 +201,22 @@ class ModelParams(BaseModel):
                 return m * mag
         return 10 * mag
 
+    def effective_frame_mm(self) -> float:
+        """The frame the build will really draw: framed panels get one even when none was asked, and a plaque needs a
+        frame wide enough to carry it."""
+        fr = self.frame_mm
+        if self.panels_x * self.panels_y > 1 and fr <= 0:
+            fr = PANEL_FRAME_MM
+        if self.plaque and fr < PLAQUE_FRAME_MM:
+            fr = PLAQUE_FRAME_MM
+        return fr
+
     def tile_size_mm(self) -> tuple[float, float]:
         w, h = self.model_size_mm
+        fr = self.effective_frame_mm()
         if self.panels_x * self.panels_y > 1:              # each framed panel: its share of the map plus its own frame
-            fr = self.frame_mm if self.frame_mm > 0 else 8.0
-            fr = max(fr, 14.0) if self.plaque else fr
             return w / self.panels_x + 2 * fr, h / self.panels_y + 2 * fr
-        return (w + 2 * self.frame_mm) / self.tiles_x, (h + 2 * self.frame_mm) / self.tiles_y
+        return (w + 2 * fr) / self.tiles_x, (h + 2 * fr) / self.tiles_y
 
     def estimated_cells(self) -> int:
         w, h = self.model_size_mm
@@ -237,3 +249,16 @@ def suggest_tiles(width_mm: float, height_mm: float, bed_x: float, bed_y: float,
             if fits and (best is None or tx * ty < best[0] * best[1]):
                 best = (tx, ty)
     return best or (12, 12)
+
+
+def suggest_panels(width_mm: float, height_mm: float, frame_mm: float, bed_x: float, bed_y: float,
+                   margin: float = 6.0) -> tuple[int, int]:
+    """Fewest framed panels (up to 6 × 6) so that each, with its own frame, fits the bed."""
+    best = None
+    for px in range(1, 7):
+        for py in range(1, 7):
+            w, h = width_mm / px + 2 * frame_mm, height_mm / py + 2 * frame_mm
+            fits = (w <= bed_x - margin and h <= bed_y - margin) or (h <= bed_x - margin and w <= bed_y - margin)
+            if fits and (best is None or px * py < best[0] * best[1]):
+                best = (px, py)
+    return best or (6, 6)

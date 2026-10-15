@@ -20,6 +20,8 @@ export default function Maqueta({ param }) {
   const [busy, run] = useBusy();
   const [exportOpen, setExportOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [adviceOpen, setAdviceOpen] = useState(false);
+  const [exportBuild, setExportBuild] = useState(null);
   const [showLog, setShowLog] = useStored("gulliver.showLog", false);
 
   const active = m && (m.status === "building" || m.status === "queued");
@@ -153,7 +155,8 @@ export default function Maqueta({ param }) {
             {!report.fits_bed && !(report.tiles || []).length && <div className="banner banner-warn">{t("too_big_for_bed", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
             {(report.tiles || []).some((x) => !x.fits_bed) && <div className="banner banner-warn">{t("tiles_too_big", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
 
-            <Printability data={report.printability || report.stats?.printability} />
+            <Printability data={report.printability || report.stats?.printability} onFix={active ? null : () => setAdviceOpen(true)} />
+            <Builds model={m} onChanged={reload} onExport={setExportBuild} />
             <Carries report={report} />
 
             <section className="space-y-2">
@@ -214,6 +217,8 @@ export default function Maqueta({ param }) {
         )}
       </div>
       {exportOpen && <ExportDialog model={m} onClose={() => setExportOpen(false)} />}
+      {exportBuild && <ExportDialog model={m} buildId={exportBuild} onClose={() => setExportBuild(null)} />}
+      {adviceOpen && <AdviceDialog model={m} onClose={() => setAdviceOpen(false)} onDone={reload} />}
       {renameOpen && <RenameDialog model={m} onClose={() => setRenameOpen(false)} onDone={reload} />}
     </div>
   );
@@ -222,7 +227,7 @@ export default function Maqueta({ param }) {
 const VERDICT_CHIP = { ok: "chip-ok", review: "chip-amber", risky: "chip-danger" };
 const pct1 = (v, lang) => `${num(v, 1, lang)} %`;
 
-function Printability({ data }) {
+function Printability({ data, onFix }) {
   const { t, lang } = useApp();
   if (!data || typeof data.score !== "number") return null;
   const verdict = VERDICT_CHIP[data.verdict] ? data.verdict : "review";
@@ -245,6 +250,9 @@ function Printability({ data }) {
         <ul className="help space-y-1">
           {data.advice.map((a, i) => <li key={i}>• {a}</li>)}
         </ul>
+      )}
+      {onFix && (data.fixes || []).length > 0 && (
+        <button type="button" className="btn btn-sm" onClick={onFix}><Icon d={ICONS.refresh} size={12} /> {t("fix_apply_open", { n: data.fixes.length })}</button>
       )}
       <details>
         <summary className="help">{t("printability_details")}{data.nozzle_mm ? ` · ${t("pr_nozzle", { n: num(data.nozzle_mm, 2, lang) })}` : ""}</summary>
@@ -290,18 +298,169 @@ function LogBox({ lines }) {
   return <pre ref={ref} className="pre">{lines.join("\n")}</pre>;
 }
 
-function ExportDialog({ model, onClose }) {
+const fxLabel = (t, param) => (t.has(`fx_${param}`) ? t(`fx_${param}`) : param);
+const fmtVal = (v, lang) => (typeof v === "number" ? num(v, Math.abs(v) < 10 && v % 1 ? 2 : 0, lang) : v === true ? "✓" : v === false ? "✗" : v == null || v === "" ? "—" : String(v));
+
+// The printability fixes of the current build as parameter changes: pick, preview what changes (size, mesh, bed), apply.
+function AdviceDialog({ model, onClose, onDone }) {
+  const { t, lang, notify } = useApp();
+  const [pick, setPick] = useState(null);
+  const [busy, run] = useBusy();
+  const only = pick ? [...pick] : undefined;
+  const { data, error } = useLoad(() => api.call("model_advice", { model_id: model.id, only: only && only.length ? only : undefined }), [model.id, only ? only.join(",") : ""]);
+  const [all, setAll] = useState(null);
+  useEffect(() => { if (data && !all) { setAll(data.fixes); setPick(new Set(data.fixes.map((f) => f.param))); } }, [data, all]);
+  const toggle = (p) => setPick((s) => { const n = new Set(s); if (n.has(p)) n.delete(p); else n.add(p); return n; });
+  const apply = () => run("apply", async () => {
+    await api.call("model_advice", { model_id: model.id, only, apply: true });
+    notify(t("fix_applied"));
+    await onDone();
+    onClose();
+  });
+  const pv = data?.preview;
+  const rows = pv ? [
+    [t("model_size"), pv.before.model_mm, pv.after.model_mm, (v) => v.map((x) => num(x, 0, lang)).join(" × ") + " mm"],
+    [t("pieces"), pv.before.tile_mm, pv.after.tile_mm, (v) => v.map((x) => num(x, 0, lang)).join(" × ") + " mm"],
+    [t("bed"), pv.before.fits_bed, pv.after.fits_bed, (v) => (v ? t("fits") : t("does_not_fit"))],
+    [t("triangles"), pv.before.triangles_estimate, pv.after.triangles_estimate, (v) => `${num(v / 1000, 0, lang)} k`],
+  ] : [];
+  return (
+    <Modal title={t("fix_title")} onClose={onClose} footer={<>
+      <button type="button" className="btn" onClick={onClose}>{t("cancel")}</button>
+      <Busy busy={busy.apply} className="btn btn-primary" onClick={apply} disabled={!pick || !pick.size}>{t("fix_apply")}</Busy>
+    </>}>
+      {error && <ErrorBox error={error} />}
+      {!all && !error && <div className="help"><span className="spinner" /> {t("loading")}</div>}
+      {all && (
+        <div className="space-y-3">
+          <p className="help">{t("fix_intro")}</p>
+          <table className="tbl">
+            <thead><tr><th /><th>{t("fix_param")}</th><th className="r">{t("fix_now")}</th><th className="r">{t("fix_new")}</th></tr></thead>
+            <tbody>
+              {all.map((f) => (
+                <tr key={f.param}>
+                  <td><input type="checkbox" checked={!!pick?.has(f.param)} onChange={() => toggle(f.param)} aria-label={fxLabel(t, f.param)} /></td>
+                  <td>{fxLabel(t, f.param)}</td>
+                  <td className="r num">{fmtVal(f.from, lang)}</td>
+                  <td className="r num"><b>{fmtVal(f.to, lang)}</b></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {pv && (
+            <table className="tbl" aria-label={t("fix_preview")}>
+              <thead><tr><th>{t("fix_preview")}</th><th className="r">{t("fix_now")}</th><th className="r">{t("fix_after")}</th></tr></thead>
+              <tbody>{rows.map(([label, a, b, f]) => <tr key={label}><td>{label}</td><td className="r num">{f(a)}</td><td className="r num">{f(b)}</td></tr>)}</tbody>
+            </table>
+          )}
+          {(pv?.warnings || []).map((w, i) => <div key={i} className="banner banner-warn">{w[lang] || w.en}</div>)}
+          <p className="help">{t("fix_keeps")}</p>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// The kept builds of the model: each with its score, size and files; any can be compared with the current or made current.
+function Builds({ model, onChanged, onExport }) {
+  const { t, lang, notify, version } = useApp();
+  const { data } = useLoad(() => api.call("model_builds", { model_id: model.id }), [model.id, model.build?.id, version]);
+  const [cmp, setCmp] = useState(null);
+  const [busy, run] = useBusy();
+  const list = data?.builds || [];
+  if (list.length < 2) return null;
+  const use = (id) => run(`use-${id}`, async () => { await api.call("model_build_use", { model_id: model.id, build_id: id }); notify(t("build_restored")); await onChanged(); });
+  return (
+    <section className="space-y-2" aria-label={t("builds")}>
+      <h2>{t("builds")}</h2>
+      <table className="tbl">
+        <thead><tr><th>{t("build_when")}</th><th className="r">{t("printability_short")}</th><th className="r">mm</th><th /></tr></thead>
+        <tbody>
+          {list.map((b) => {
+            const r = b.report || {};
+            const files = r.files || {};
+            return (
+              <tr key={b.id}>
+                <td>{b.finished ? <Rel ts={b.finished} /> : b.id} {b.current && <span className="chip chip-ok">{t("build_current")}</span>}</td>
+                <td className="r num">{r.score != null ? r.score : "—"}</td>
+                <td className="r num">{(r.size_mm || []).slice(0, 2).map((v) => num(v, 0, lang)).join("×")}</td>
+                <td className="whitespace-nowrap">
+                  {files["3mf"] && <a href={fileUrl(model.id, files["3mf"], { download: true, kept: b.current ? "" : b.id })}>3MF</a>}
+                  {files.stl && <> · <a href={fileUrl(model.id, files.stl, { download: true, kept: b.current ? "" : b.id })}>STL</a></>}
+                  {!b.current && <>
+                    {" · "}<button type="button" className="btn-link" onClick={() => setCmp(b.id)}>{t("build_compare")}</button>
+                    {" · "}<button type="button" className="btn-link" onClick={() => onExport(b.id)}>{t("export")}</button>
+                    {" · "}<Busy busy={busy[`use-${b.id}`]} className="btn-link" onClick={() => use(b.id)}>{t("build_use")}</Busy>
+                  </>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {cmp && <CompareDialog model={model} a={cmp} onClose={() => setCmp(null)} />}
+    </section>
+  );
+}
+
+const METRIC_LABEL = { width_mm: "cmp_width", depth_mm: "cmp_depth", height_mm: "cmp_height", weight_g_pla: "weight", volume_cm3: "volume",
+  triangles: "triangles", buildings: "buildings", tiles: "pieces", score: "printability_short", fits_bed: "bed", watertight: "check" };
+
+function CompareDialog({ model, a, onClose }) {
+  const { t, lang } = useApp();
+  const { data, error } = useLoad(() => api.call("model_compare", { model_id: model.id, a }), [model.id, a]);
+  const thumb = (id, current) => fileUrl(model.id, "thumb.png", { build: id, kept: current ? "" : id });
+  return (
+    <Modal title={t("cmp_title")} onClose={onClose} footer={<button type="button" className="btn" onClick={onClose}>{t("close")}</button>}>
+      {error && <ErrorBox error={error} />}
+      {!data && !error && <div className="help"><span className="spinner" /> {t("loading")}</div>}
+      {data && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            {[["A", data.a], ["B", data.b]].map(([k, x]) => (
+              <figure key={k} className="space-y-1">
+                <img src={thumb(x.id, x.current)} alt={t("cmp_thumb", { k })} style={{ width: "100%", borderRadius: 8 }} />
+                <figcaption className="help"><b>{k}</b> · {x.finished ? <Rel ts={x.finished} /> : x.id}{x.current ? ` · ${t("build_current")}` : ""}</figcaption>
+              </figure>
+            ))}
+          </div>
+          {data.printability_better && <div className="banner">{t(`cmp_better_${data.printability_better}`)}</div>}
+          <table className="tbl">
+            <thead><tr><th /><th className="r">A</th><th className="r">B</th><th className="r">Δ</th></tr></thead>
+            <tbody>
+              {data.metrics.filter((r) => r.a != null || r.b != null).map((r) => (
+                <tr key={r.key}><td>{t(METRIC_LABEL[r.key] || r.key)}</td><td className="r num">{fmtVal(r.a, lang)}</td><td className="r num">{fmtVal(r.b, lang)}</td>
+                  <td className="r num">{r.delta ? (r.delta > 0 ? "+" : "") + fmtVal(r.delta, lang) : ""}</td></tr>
+              ))}
+            </tbody>
+          </table>
+          <h3>{t("cmp_params")}</h3>
+          {!data.params_known ? <p className="help">{t("cmp_params_unknown")}</p> : data.params_changed.length === 0 ? <p className="help">{t("cmp_params_same")}</p> : (
+            <table className="tbl">
+              <tbody>{data.params_changed.map((c) => <tr key={c.param}><td>{fxLabel(t, c.param)}</td><td className="r num">{fmtVal(c.a, lang)}</td><td className="r num"><b>{fmtVal(c.b, lang)}</b></td></tr>)}</tbody>
+            </table>
+          )}
+          {(data.parts_added.length > 0 || data.parts_removed.length > 0) && (
+            <p className="help">{data.parts_added.length > 0 && t("cmp_parts_added", { v: data.parts_added.join(", ") })} {data.parts_removed.length > 0 && t("cmp_parts_removed", { v: data.parts_removed.join(", ") })}</p>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function ExportDialog({ model, buildId = "", onClose }) {
   const { t, notify } = useApp();
   const [folder, setFolder] = useState("");
   const [what, setWhat] = useState("all");
   const [busy, run] = useBusy();
   const go = () => run("export", async () => {
-    const r = await api.call("model_export", { model_id: model.id, folder, what });
+    const r = await api.call("model_export", { model_id: model.id, folder, what, build_id: buildId });
     notify(t("exported", { n: r.copied.length, folder: r.folder }));
     onClose();
   });
   return (
-    <Modal title={t("export_title")} onClose={onClose} footer={<>
+    <Modal title={buildId ? t("export_title_build") : t("export_title")} onClose={onClose} footer={<>
       <button type="button" className="btn" onClick={onClose}>{t("cancel")}</button>
       <Busy busy={busy.export} className="btn btn-primary" onClick={go}>{t("export")}</Busy>
     </>}>

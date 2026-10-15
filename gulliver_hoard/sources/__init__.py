@@ -21,8 +21,10 @@ from .http import Fetcher
 class Sources:
     fake = False
 
-    def __init__(self, fetcher: Fetcher, *, overpass_servers: Optional[list[str]] = None):
+    def __init__(self, fetcher: Fetcher, *, overpass_servers: Optional[list[str]] = None,
+                 keys: Optional[dict[str, str]] = None):
         self.fetcher = fetcher
+        self.keys = dict(keys or {})          # keys of the sources that need one (Denmark's surface model)
         self.overpass_servers = overpass_servers or list(_osm.DEFAULT_SERVERS)
 
     def dem(self, bbox, want_res_m: float, *, prefer: str = "auto", progress: Optional[Callable[[str], None]] = None) -> Any:
@@ -83,7 +85,7 @@ class Sources:
 
     def dsm(self, bbox, *, res_m: float = 1.0, progress: Optional[Callable[[str], None]] = None):
         """Surface heights from an open laser survey (heights, lon/lat bounds, attribution, is_ndsm)."""
-        return _dsm.fetch(self.fetcher, bbox, res_m=res_m, progress=progress)
+        return _dsm.fetch(self.fetcher, bbox, res_m=res_m, progress=progress, ndsm=True, keys=self.keys)
 
     def search(self, query: str, limit: int = 6, language: str = "es") -> list[dict[str, Any]]:
         return _geocode.search(self.fetcher, query, limit, language)

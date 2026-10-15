@@ -115,10 +115,37 @@ def test_providers_by_place():
     assert dsm.provider_for((10.70, 59.90, 10.72, 59.91)).key == "no"               # Oslo
     assert dsm.provider_for((21.00, 52.23, 21.02, 52.24)).key == "pl"               # Warsaw
     assert dsm.provider_for((3.72, 51.05, 3.74, 51.06)).key == "fl"                 # Ghent
-    assert dsm.provider_for((-3.71, 40.41, -3.69, 40.43)) is None                   # Madrid
     assert dsm.provider_for((-60.0, -3.1, -59.9, -3.0)) is None                     # Amazon
     for p in dsm.PROVIDERS.values():
         assert p.attribution and p.native_m > 0 and p.name
+
+
+def test_spanish_regions_come_before_the_national_model():
+    keys = lambda b: [p.key for p in dsm.providers_for(b)]                         # noqa: E731
+    assert keys((-1.65, 42.81, -1.64, 42.82)) == ["es_nav", "es"]                   # Pamplona: LiDAR 2 m of Navarra, then the IGN
+    assert keys((-1.99, 43.31, -1.97, 43.32)) == ["es_gip", "es"]                   # San Sebastian
+    assert keys((-3.81, 43.46, -3.80, 43.47)) == ["es_cant", "es"]                  # Santander
+    for name, b in {"Bilbao": (-2.94, 43.26, -2.93, 43.27), "Barcelona": (2.18, 41.39, 2.19, 41.40),
+                    "Sevilla": (-5.99, 37.38, -5.98, 37.39), "Madrid": (-3.71, 40.41, -3.69, 40.43),
+                    "Valencia": (-0.38, 39.46, -0.37, 39.47), "Palma": (2.64, 39.56, 2.65, 39.57),
+                    "Vigo": (-8.72, 42.23, -8.71, 42.24), "Santiago": (-8.55, 42.87, -8.54, 42.88)}.items():
+        assert keys(b) == ["es"], name
+    assert keys((-16.26, 28.46, -16.25, 28.47)) == []                               # Canarias: not verified, not offered
+    assert keys((-9.15, 38.71, -9.13, 38.72)) == []                                 # Lisbon is not Spain
+    es = dsm.PROVIDERS["es"]
+    assert es.layer == "mds05" and es.ndsm_layer == "mdsn_e025" and es.kind == "wcs2"
+    assert dsm.PROVIDERS["es_nav"].ndsm_layer.endswith("Alturas_2M") and dsm.PROVIDERS["es_nav"].axes == ("E", "N")
+
+
+def test_keyed_provider_is_ignored_without_its_key_and_used_with_it():
+    cph = (12.56, 55.67, 12.58, 55.69)                                              # Copenhagen
+    assert dsm.providers_for(cph) == [] and dsm.provider_for(cph) is None
+    assert dsm.providers_for(cph, {}) == [] and dsm.providers_for(cph, {"other": "x"}) == []
+    assert dsm.providers_for(cph, {"dataforsyningen": ""}) == []                    # an empty key is no key
+    assert [p.key for p in dsm.providers_for(cph, {"dataforsyningen": "abc"})] == ["dk"]
+    assert dsm.provider_for(cph, {"dataforsyningen": "abc"}).needs_key == "dataforsyningen"
+    assert dsm.provider_for((12.56, 55.67, 12.58, 55.69), {"dataforsyningen": "abc"}).layer == "dhm_overflade"
+    assert all(p.needs_key == "" for k, p in dsm.PROVIDERS.items() if k != "dk")    # only Denmark needs one
 
 
 def test_fetch_refuses_big_areas_and_unknown_places(tmp_path):
@@ -127,8 +154,14 @@ def test_fetch_refuses_big_areas_and_unknown_places(tmp_path):
         dsm.fetch(f, (5.0, 52.0, 5.1, 52.1))                        # ~ 69 km²
     assert e.value.code == "too_large"
     with pytest.raises(GulliverError) as e:
-        dsm.fetch(f, (-3.71, 40.41, -3.69, 40.43))
+        dsm.fetch(f, (-60.0, -3.1, -59.99, -3.09))                  # the Amazon
     assert e.value.code == "unavailable"
+    with pytest.raises(GulliverError) as e:                         # Denmark without its token: nothing to ask
+        dsm.fetch(f, (12.56, 55.67, 12.57, 55.68))
+    assert e.value.code == "unavailable"
+    with pytest.raises(GulliverError) as e:                         # asking for the keyed provider by name does not skip the key
+        dsm.fetch(f, (12.56, 55.67, 12.57, 55.68), provider=dsm.PROVIDERS["dk"])
+    assert e.value.code == "unavailable" and "key" in e.value.message
 
 
 def test_multipart_and_aaigrid():
@@ -202,3 +235,125 @@ def test_fetch_falls_back_to_the_next_provider(tmp_path):
     with pytest.raises(GulliverError) as e:
         dsm.fetch(f, (2.349, 48.852, 2.351, 48.854))
     assert e.value.code == "source_failed"
+
+
+def fake_tile(request: httpx.Request, epsg: int, x_of, native: float, ground=10.0, top=60.0):
+    """A GeoTIFF for a WCS 1.0.0 (BBOX) or 2.0.1 (SUBSET) request: ``ground`` metres with a 20 x 20 m block of ``top``
+    metres in the middle of the requested area, in ``epsg`` metres."""
+    from rasterio.io import MemoryFile
+    from rasterio.transform import from_origin
+
+    q = dict(request.url.params.multi_items())
+    if "BBOX" in q:
+        x0, y0, x1, y1 = (float(v) for v in q["BBOX"].split(","))
+        w, h = int(q["WIDTH"]), int(q["HEIGHT"])
+    else:
+        (x0, x1), (y0, y1) = (tuple(float(t) for t in s[s.index("(") + 1:-1].split(","))
+                              for _k, s in request.url.params.multi_items() if _k == "SUBSET")
+        step = native / float(q.get("SCALEFACTOR", 1.0))
+        w, h = int(round((x1 - x0) / step)), int(round((y1 - y0) / step))
+    a = np.full((h, w), ground, dtype=np.float32)
+    cx, cy = x_of
+    xs = x0 + (np.arange(w) + 0.5) * (x1 - x0) / w
+    ys = y1 - (np.arange(h) + 0.5) * (y1 - y0) / h
+    X, Y = np.meshgrid(xs - cx, ys - cy)
+    a[(abs(X) < 10) & (abs(Y) < 10)] = top
+    with MemoryFile() as mem:
+        with mem.open(driver="GTiff", width=w, height=h, count=1, dtype="float32", crs=f"EPSG:{epsg}",
+                      transform=from_origin(x0, y1, (x1 - x0) / w, (y1 - y0) / h), nodata=-9999.0) as ds:
+            ds.write(a, 1)
+        return httpx.Response(200, content=mem.read(), headers={"content-type": "image/tiff"})
+
+
+def test_denmark_with_a_token_asks_the_way_the_capabilities_say(tmp_path):
+    from rasterio.warp import transform
+
+    lon, lat = 12.5683, 55.6761
+    cx, cy = (v[0] for v in transform("EPSG:4326", "EPSG:25832", [lon], [lat]))
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        q = dict(request.url.params.multi_items())
+        if q.get("token") != "secret-token":
+            return httpx.Response(403, text="User not authorized", headers={"content-type": "text/plain"})
+        return fake_tile(request, 25832, (cx, cy), 0.4, ground=5.0, top=95.0)
+
+    f = Fetcher(tmp_path / "c", transport=httpx.MockTransport(handler))
+    proj = Projector(lon, lat)
+    lo, hi = proj.inv(-120, -120), proj.inv(120, 120)
+    bbox = (lo[0], lo[1], hi[0], hi[1])
+    heights, bounds, attribution, is_ndsm = dsm.fetch(f, bbox, res_m=1.0, keys={"dataforsyningen": "secret-token"})
+    q = dict(calls[0].url.params.multi_items())
+    assert str(calls[0].url).startswith("https://api.dataforsyningen.dk/dhm_wcs_DAF?")
+    assert (q["SERVICE"], q["VERSION"], q["REQUEST"], q["COVERAGE"], q["CRS"], q["token"]) == (
+        "WCS", "1.0.0", "GetCoverage", "dhm_overflade", "EPSG:25832", "secret-token")
+    assert not is_ndsm and "Dataforsyningen" in attribution and np.nanmax(heights) == pytest.approx(95.0, abs=0.5)
+    (r,) = dsm.building_heights(heights, bounds, proj, [box(-10, -10, 10, 10)])
+    assert r["roof_m"] == pytest.approx(90.0, abs=2.0)                              # 95 above the 5 m ground
+    # the token never reaches the cache key or the stored grid name
+    assert not any("secret-token" in str(p) for p in (tmp_path / "c").rglob("*"))
+    # a refused token says so, and without a token nothing is even tried
+    f2 = Fetcher(tmp_path / "c2", transport=httpx.MockTransport(handler))
+    with pytest.raises(GulliverError) as e:
+        dsm.fetch(f2, bbox, keys={"dataforsyningen": "wrong"})
+    assert e.value.code == "source_failed" and "key" in e.value.message and "wrong" not in e.value.message
+    n = len(calls)
+    with pytest.raises(GulliverError):
+        dsm.fetch(f2, bbox)
+    assert len(calls) == n
+
+
+def test_spanish_request_shapes():
+    es, nav, gip, cant = (dsm.PROVIDERS[k] for k in ("es", "es_nav", "es_gip", "es_cant"))
+    params, url = dsm._request(es, True, (500000.0, 4790000.0, 504500.0, 4794500.0), 2.5)
+    assert url == "https://wcs-mds.idee.es/mds" and params["COVERAGEID"] == "mdsn_e025"
+    assert params["SUBSET"] == ["x(500000.000,504500.000)", "y(4790000.000,4794500.000)"] and "SCALEFACTOR" not in params
+    params, _ = dsm._request(es, False, (500000.0, 4790000.0, 504500.0, 4794500.0), 5.0)
+    assert params["COVERAGEID"] == "mds05" and params["SCALEFACTOR"] == "0.5000"
+    params, url = dsm._request(nav, False, (610900.0, 4741600.0, 611100.0, 4741800.0), 2.0)
+    assert url == "https://idena.navarra.es/ogc/wcs" and params["COVERAGEID"] == "IDENA.WCS__ELEVAC_Ras_MDS_2M"
+    assert params["SUBSET"] == ["E(610900.000,611100.000)", "N(4741600.000,4741800.000)"]
+    params, _ = dsm._request(nav, True, (610900.0, 4741600.0, 611100.0, 4741800.0), 2.0)
+    assert params["COVERAGEID"] == "IDENA.WCS__ELEVAC_Ras_Alturas_2M"
+    params, _ = dsm._request(gip, False, (582340.0, 4796586.0, 582540.0, 4796786.0), 1.0)
+    assert (params["VERSION"], params["FORMAT"], params["WIDTH"], params["HEIGHT"], params["CRS"]) == ("1.0.0", "GEOTIFFFLOAT32", 200, 200, "EPSG:25830")
+    assert params["COVERAGE"].startswith("LIDAR 2017") and "token" not in params
+    params, _ = dsm._request(cant, False, (434700.0, 4812350.0, 435000.0, 4812650.0), 1.0)
+    assert (params["COVERAGE"], params["FORMAT"], params["WIDTH"]) == ("23", "GeoTIFF", 300)
+
+
+def test_navarra_mock_end_to_end_prefers_the_regional_model(tmp_path):
+    from rasterio.warp import transform
+
+    lon, lat = -1.6443, 42.8125
+    cx, cy = (v[0] for v in transform("EPSG:4326", "EPSG:25830", [lon], [lat]))
+    hosts = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        return fake_tile(request, 25830, (cx, cy), 2.0, ground=445.0, top=495.0)
+
+    f = Fetcher(tmp_path / "c", transport=httpx.MockTransport(handler))
+    proj = Projector(lon, lat)
+    lo, hi = proj.inv(-150, -150), proj.inv(150, 150)
+    heights, bounds, attribution, is_ndsm = dsm.fetch(f, (lo[0], lo[1], hi[0], hi[1]), res_m=1.0)
+    assert set(hosts) == {"idena.navarra.es"} and "Navarra" in attribution and not is_ndsm
+    (r,) = dsm.building_heights(heights, bounds, proj, [box(-9, -9, 9, 9)])
+    assert r["roof_m"] == pytest.approx(50.0, abs=2.0)
+
+
+def test_known_heights_survive_the_surface_model_and_still_get_towers():
+    from gulliver_hoard.mesh.build import _apply_dsm
+    from gulliver_hoard.sources.osm import Building, Features
+    h, bounds, proj = synthetic()
+    foot = box(20, -20, 60, 20)
+    for known, estimated, want in ((18.0, False, 18.0),     # cadastral floors close to the laser: kept
+                                   (9.0, False, 20.0),      # a block grown since the cadastre: the laser wins
+                                   (9.0, True, 20.0)):      # a guess: the laser wins
+        feats = Features()
+        feats.buildings = [Building(foot, known, 0.0, "yes", estimated=estimated)]
+        _apply_dsm(feats, h, bounds, proj, False)
+        b = feats.buildings[0]
+        assert b.height_m == pytest.approx(want, abs=1.0) and not b.estimated
+        assert any(q.part and q.kind == "tower" for q in feats.buildings[1:])

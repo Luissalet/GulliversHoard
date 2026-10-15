@@ -174,6 +174,19 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
     params = getattr(result, "params", None)
     advice: list[str] = []
     penalty = 0.0
+    wanted: dict[str, Any] = {}              # parameter -> the value that would fix what was found
+
+    def fix(name: str, value: Any) -> None:
+        cur = getattr(params, name, None) if params is not None else None
+        if cur is None:
+            return
+        if isinstance(cur, bool):                    # a switch: turned on
+            if value and not cur:
+                wanted[name] = True
+            return
+        value = round(float(value), 2)
+        if value > float(cur) + 1e-9:
+            wanted[name] = max(wanted.get(name, 0.0), value)
 
     parts: dict[str, Any] = {}
     for name, solid in (getattr(result, "parts", None) or {}).items():
@@ -192,12 +205,17 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
             continue
         if name == "buildings":
             advice.append(f"Hay {_n(n, 'edificio suelto demasiado pequeño', 'edificios sueltos demasiado pequeños')} para imprimirse: sube min_building_mm2 o el tamaño del modelo (size_mm).")
+            # a modest step: the loose crumbs are the smallest footprints, and a big jump would drop whole streets of houses
+            fix("min_building_mm2", max(0.8, float(getattr(params, "min_building_mm2", 0) or 0) * 1.5))
         elif name == "trees":
             advice.append(f"Hay {_n(n, 'árbol minúsculo que no se agarraría', 'árboles minúsculos que no se agarrarían')} a la cama: sube tree_size_mm o baja tree_density.")
+            fix("tree_size_mm", min(6.0, two * 1.5))
         elif name in ("terrain", "water"):
             advice.append(f"La pieza «{NAMES.get(name, name)}» tiene {_n(n, 'islote diminuto', 'islotes diminutos')}: sube resolution_mm para suavizarla.")
+            fix("resolution_mm", min(3.0, float(getattr(params, "resolution_mm", 0.35) or 0.35) * 1.3))
         elif name == "track":
             advice.append(f"La ruta tiene {_n(n, 'trozo suelto diminuto', 'trozos sueltos diminutos')}: sube track_width_mm.")
+            fix("track_width_mm", min(5.0, two * 1.5))
         else:
             advice.append(f"La pieza «{NAMES.get(name, name)}» tiene {_n(n, 'trozo suelto diminuto', 'trozos sueltos diminutos')}: sube resolution_mm o el tamaño del modelo (size_mm).")
 
@@ -205,7 +223,8 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
     buildings = {"count": n_build, "thin_walls": n_thin_build, "min_side_mm": round(two, 3)}
     if n_thin_build:
         penalty += min(25.0, 70.0 * n_thin_build / max(1, n_build))
-        advice.append(f"Hay {_n(n_thin_build, 'edificio más fino', 'edificios más finos')} que dos pasadas de boquilla: sube min_building_mm2 o el tamaño del modelo (size_mm).")
+        advice.append(f"Hay {_n(n_thin_build, 'edificio más fino', 'edificios más finos')} que dos pasadas de boquilla: activa thicken (los ensancha) o sube el tamaño del modelo (size_mm).")
+        fix("thicken", True)                           # widens them instead of dropping them
 
     layers: dict[str, Any] = {}
     for key, weight in _LAYERS:
@@ -221,17 +240,25 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         penalty += min(12.0, pct * weight)
         if pct >= 10.0:
             label = _LAYER_LABEL[key]
-            fix = {"roads": "sube min_road_mm o el tamaño del modelo (size_mm)",
+            how = {"roads": "sube min_road_mm o el tamaño del modelo (size_mm)",
                    "paths": "sube min_path_mm o desactiva paths",
                    "rails": "sube el tamaño del modelo (size_mm) o desactiva rails",
                    "green": "sube resolution_mm o desactiva green"}[key]
-            advice.append(f"El {pct:.0f} % {label} es más fino que dos pasadas de boquilla: {fix}.")
+            advice.append(f"El {pct:.0f} % {label} es más fino que dos pasadas de boquilla: {how}.")
+            fix("thicken", True)                       # widens streets, rails and paths to two passes
+            if key == "roads":
+                fix("min_road_mm", min(5.0, two))
+            elif key == "paths":
+                fix("min_path_mm", min(3.0, two))
+            elif key == "green":
+                fix("resolution_mm", min(3.0, float(getattr(params, "resolution_mm", 0.35) or 0.35) * 1.3))
 
     n_trees, n_thin_trees = _thin_trees(fp.get("trees"), two)
     trees = {"count": n_trees, "thin_crowns": n_thin_trees}
     if n_thin_trees:
         penalty += min(10.0, 25.0 * n_thin_trees / max(1, n_trees))
         advice.append(f"Hay {_n(n_thin_trees, 'copa de árbol más fina', 'copas de árbol más finas')} que dos pasadas de boquilla: sube tree_size_mm.")
+        fix("tree_size_mm", min(6.0, two * 1.25))
 
     if params is not None:
         res = getattr(params, "resolution_mm", None)
@@ -240,10 +267,12 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         base = getattr(params, "base_mm", None)
         if base is not None and base < 4 * layer_mm:
             advice.append("La base tiene menos de cuatro capas: sube base_mm para que la pieza no se despegue.")
+            fix("base_mm", 4 * layer_mm)
             penalty += 3.0
         depth = getattr(params, "water_depth_mm", None)
         if depth is not None and depth < 2 * layer_mm and not _is_empty(fp.get("water")):
             advice.append("El agua queda a menos de dos capas por debajo de la orilla y no se distinguirá: sube water_depth_mm.")
+            fix("water_depth_mm", 2 * layer_mm)
             penalty += 2.0
 
     score = int(round(max(0.0, min(100.0, 100.0 - penalty))))
@@ -252,4 +281,5 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         advice.append("Nada que corregir: con esta boquilla el modelo debería imprimirse sin problemas.")
     return {"nozzle_mm": nozzle, "layer_mm": float(layer_mm), "score": score, "verdict": verdict, "parts": parts,
             "buildings": buildings, "layers": layers, "trees": trees,
-            "tiny_bodies": tiny_total, "advice": advice}
+            "tiny_bodies": tiny_total, "advice": advice,
+            "fixes": [{"param": k, "from": getattr(params, k), "to": v} for k, v in sorted(wanted.items())]}

@@ -24,7 +24,8 @@ def child_main(q: Any, args: dict[str, Any]) -> None:
         from .sources.http import Fetcher
 
         fetcher = Fetcher(Path(args["cache_dir"]))
-        sources = FakeSources(fetcher) if args.get("fake") else Sources(fetcher, overpass_servers=args.get("servers") or None)
+        sources = FakeSources(fetcher) if args.get("fake") else Sources(fetcher, overpass_servers=args.get("servers") or None,
+                                                                        keys=args.get("keys") or None)
 
         def progress(fraction: float, message: str) -> None:
             q.put(("progress", fraction, message))
