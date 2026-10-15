@@ -1,5 +1,13 @@
 @import "tailwindcss";
 
+.assembly-guide summary { cursor:pointer; }
+.assembly-guide select { width:100%; }
+.assembly-map { width:100%; margin:1rem 0; background:#fffdf8; border-radius:4px; }
+.assembly-materials { list-style:none; padding:0; margin:.75rem 0; }
+.assembly-materials li { display:flex; align-items:center; gap:.5rem; margin:.4rem 0; overflow-wrap:anywhere; }
+.assembly-pieces { padding-left:1.5rem; }
+.assembly-pieces li { margin:.75rem 0; overflow-wrap:anywhere; }
+
 /* Colours come from the shared Hoard theme (hoard-theme.css, palette "gulliver"); names below are this app's own. */
 :root {
   color-scheme: dark;

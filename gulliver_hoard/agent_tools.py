@@ -128,6 +128,15 @@ class BuildFilesArgs(BaseModel):
     build_id: str = Field("", max_length=32, description="A kept build (model_builds); empty = the current one.")
 
 
+class AssemblyArgs(BuildFilesArgs):
+    offset: int = Field(0, ge=0)
+    limit: int = Field(12, ge=1, description="Pieces per page; follow next_offset until null.")
+
+
+class AssemblyExportArgs(BuildFilesArgs):
+    lang: Literal["es", "en"] = "es"
+
+
 class CompareArgs(BaseModel):
     model_id: str = ModelId
     a: str = Field("", max_length=32, description="Build A; empty = the one before the current.")
@@ -225,6 +234,14 @@ WD = ann(draft_safe=True)
 D = ann(destructive=True)
 
 TOOLS: list[Tool] = [
+    Tool("model_assembly", _d("Assembly guide for a kept build: numbered pieces, files and materials. Guia de montaje.",
+                              "Uses only that generation. Piece pages share stable numbers; follow next_offset until null.",
+                              synonyms="montar, piezas, orientacion, filamentos"), AssemblyArgs, R,
+         lambda s, a: s.assembly(a.model_id, a.build_id, offset=a.offset, limit=a.limit)),
+    Tool("model_assembly_export", _d("Create a self-contained printable HTML assembly guide from a kept build. Exportar guia.",
+                                     "Base outlines come from the original STL exports. Does not redraw horizontal pin holes or slice a model.",
+                                     synonyms="imprimir, montaje, plano, html, pdf"), AssemblyExportArgs, W,
+         lambda s, a: s.assembly_export(a.model_id, a.build_id, lang=a.lang), 600.0),
     Tool("print_profiles", _d("Saved printer/material profiles (active or archived). Perfiles de impresion.", synonyms="boquilla, cama, filamento"),
          ProfilesArgs, R, lambda s, a: s.print_profiles.list(a.archived)),
     Tool("print_profile_save", _d("Save a whole printer/material profile; empty id creates one. Guardar perfil.", synonyms="impresora, material, precios"),

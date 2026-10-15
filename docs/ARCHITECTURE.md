@@ -1,5 +1,7 @@
 # Architecture
 
+`assembly_guide.py` reads a kept build's `report.json`, `params.json`, thumbnail and original binary STL files. The map unions their coplanar lowest faces and fills engraving holes, retaining concave cut edges; it is the base footprint, not a projection of overhangs or a drilling template. Pieces keep their file IDs and stable guide numbers, and move apart for legibility; framed panels receive space for their separate frames. No current profile/settings are used. Missing legacy snapshots leave pin/label metadata unknown. `model_assembly` returns paged file/material data; `model_assembly_export` writes only `assembly-{es,en}.html` and `assembly-map.svg` beside the originals. Ordinary files/export discovers these optional artifacts without changing report bytes. HTML embeds the SVG and thumbnail and has print styles. `AssemblyGuide.jsx` follows the current/history selection in the model viewer, including per-build download links.
+
 Printing profiles: `printing.py` validates profiles and atomically stores `print-profiles.json`. `ModelParams.print_profile` is the immutable model/build snapshot. Services and workers resolve its bed consistently; explicit selection sets the nozzle while later manual edits remain possible. `surface_mm2` plus solid volume feed the shell/infill estimate; per-part volume shares receive density/price/colour overrides. Missing prices remain unknown. `model_materials` is a pure quote of existing geometry. New builds export profile colours through the ordinary 3MF/GLB/thumb path.
 
 Printability locations use Z-up preview millimetres and per-part IDs. Viewer3D adds disposable instanced rings to their tile groups, so exploded tiles carry the markers; these nodes never enter a mesh/export. Legacy reports without surface/location data retain their old viewer and offer regeneration. `model_issues` returns stable pages with total/offset/next_offset so the shared response budget cannot hide the remaining coordinates. UI, REST and MCP share six typed handlers for profiles, applying a profile, material estimates and issue locations.
@@ -12,7 +14,7 @@ browser / MCP bridge / Faustus / Hoard Hub
         ▼
   main.py ─ api/ui.py (/api/ui/call, files, events, /api/models, media) ─ api/agent.py (Bearer, MCP)
         │
-  agent_tools.py ── one catalogue of 30 tools (pydantic arguments)
+  agent_tools.py ── one catalogue of 32 tools (pydantic arguments)
         │
   services.py ── Settings · Sources · Projects · Jobs · area_check · export · Vulcan
         │

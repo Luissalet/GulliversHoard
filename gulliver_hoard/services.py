@@ -315,8 +315,20 @@ class Services:
         for t in report.get("tiles") or []:
             for kind in ("stl", "3mf"):
                 files.append({"kind": f"tile-{kind}", "tile": t["id"], "name": t[kind], "path": str(folder / t[kind]), "url": base + t[kind] + q})
+        for name in ("assembly-es.html", "assembly-en.html", "assembly-map.svg"):
+            if (folder / name).is_file():
+                files.append({"kind": "assembly", "name": name, "path": str(folder / name), "url": base + name + q,
+                              "bytes": (folder / name).stat().st_size})
         return {"model_id": pid, "name": rec["name"], "build_id": build_id or current, "current": not build_id,
                 "folder": str(folder), "files": files}
+
+    def assembly(self, pid: str, build_id: str = "", *, offset: int = 0, limit: int = 12) -> dict[str, Any]:
+        from .assembly_guide import guide
+        return guide(self, pid, build_id, offset=offset, limit=limit)
+
+    def assembly_export(self, pid: str, build_id: str = "", *, lang: str = "es") -> dict[str, Any]:
+        from .assembly_guide import export
+        return export(self, pid, build_id, lang=lang)
 
     # -- builds: history, comparison, printability fixes ---------------------------------------------------------------------
     def profile_apply(self, pid: str, profile_id: str, *, duplicate: bool = True, build: bool = True) -> dict[str, Any]:

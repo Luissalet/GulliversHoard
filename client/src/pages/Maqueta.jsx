@@ -4,6 +4,7 @@ import { useApp } from "../context.js";
 import { Bar, Busy, ErrorBox, Icon, ICONS, Modal, Rel, useBusy, useLoad, useStored } from "../components/ui.jsx";
 import Viewer3D from "../components/Viewer3D.jsx";
 import { ModelPrinting } from "../components/PrintProfiles.jsx";
+import AssemblyGuide from "../components/AssemblyGuide.jsx";
 import { partName } from "../printing-strings.js";
 import ProductShot, { shotText } from "../components/ProductShot.jsx";
 import { StatusChip, stepLabel } from "./Biblioteca.jsx";
@@ -165,6 +166,7 @@ export default function Maqueta({ param }) {
 
             <Printability data={report.printability || report.stats?.printability} onFix={active ? null : () => setAdviceOpen(true)} activeLayer={issueLayer} onLocate={layer=>{setIssueLayer(layer === issueLayer ? null : layer);setView("top");}} />
             <ModelPrinting key={m.id} model={m}/>
+            <AssemblyGuide key={m.id+build+lang} model={m}/>
             <Builds model={m} onChanged={reload} onExport={setExportBuild} />
             <Carries report={report} />
 
