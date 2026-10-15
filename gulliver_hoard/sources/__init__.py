@@ -41,5 +41,12 @@ class Sources:
         rgb, box = _aerial.fetch(self.fetcher, bbox, progress=progress)
         return _aerial.trees(rgb, box, projector)
 
+    def aerial_cover(self, bbox, m_per_px: float, *, progress: Optional[Callable[[str], None]] = None) -> Optional[tuple]:
+        """Ground cover read from the aerial photo (Spain) at about ``m_per_px``: (masks, photo bbox), or None."""
+        if not _aerial.covers(bbox):
+            return None
+        rgb, box = _aerial.fetch(self.fetcher, bbox, m_per_px=m_per_px, progress=progress)
+        return _aerial.cover(rgb), box
+
     def search(self, query: str, limit: int = 6, language: str = "es") -> list[dict[str, Any]]:
         return _geocode.search(self.fetcher, query, limit, language)

@@ -98,6 +98,7 @@ class Features:
     buildings: list[Building] = field(default_factory=list)
     water: Any = None             # Polygon/MultiPolygon (areas)
     waterways: list[tuple[Any, float, str]] = field(default_factory=list)   # (line, width_m, kind)
+    weirs: list[tuple[Any, str]] = field(default_factory=list)   # (line or outline, "weir" | "dam") across the water
     roads: list[Road] = field(default_factory=list)
     rails: list[Road] = field(default_factory=list)
     green: Any = None             # Polygon/MultiPolygon (all vegetation)
@@ -116,6 +117,7 @@ class Features:
             "buildings_with_height": sum(1 for b in self.buildings if not b.estimated),
             "water_km2": round((self.water.area if self.water is not None else 0.0) / 1e6, 4),
             "waterways": len(self.waterways),
+            "weirs": len(self.weirs),
             "roads": len(self.roads),
             "bridges": sum(1 for r in self.roads if r.bridge),
             "rails": len(self.rails),
@@ -146,7 +148,7 @@ def build_query(bbox: tuple[float, float, float, float], timeout: int = 180) -> 
             'way["natural"~"^(bare_rock|scree|shingle|glacier)$"];relation["natural"~"^(bare_rock|scree|shingle|glacier)$"];'
             'way["waterway"~"^(riverbank|dock)$"];relation["waterway"="riverbank"];'
             'way["landuse"~"^(reservoir|basin)$"];relation["landuse"~"^(reservoir|basin)$"];'
-            'way["waterway"~"^(river|stream|canal|drain|ditch)$"];'
+            'way["waterway"~"^(river|stream|canal|drain|ditch|weir|dam)$"];'
             'way["highway"];'
             'way["railway"~"^(rail|light_rail|tram|subway|narrow_gauge|monorail|funicular)$"];'
             f"{green}"
@@ -468,6 +470,9 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
             if line is not None:
                 feats.tree_rows.append(line)
             continue
+        if kind == "way" and tags.get("waterway") in ("weir", "dam"):
+            feats.weirs.append((shape if shape is not None else line, tags["waterway"]))
+            continue
         if kind == "way" and tags.get("waterway") in WATERWAY_WIDTH_M:
             w = _num(tags.get("width")) or WATERWAY_WIDTH_M[tags["waterway"]]
             if tags.get("tunnel") in ("yes", "culvert"):
@@ -521,6 +526,7 @@ def parse(data: dict[str, Any], projector: Projector, width_m: float, height_m: 
     feats.roads = [r for r in feats.roads if r.line is not None and r.line.intersects(clip)]
     feats.rails = [r for r in feats.rails if r.line is not None and r.line.intersects(clip)]
     feats.waterways = [w for w in feats.waterways if w[0] is not None and w[0].intersects(clip)]
+    feats.weirs = [w for w in feats.weirs if w[0] is not None and w[0].intersects(clip)]
     landmarks.sort(key=lambda l: (l["rank"], -l["height_m"], -l["area_m2"]))
     seen_names: set[str] = set()
     landmarks = [l for l in landmarks if not (l["name"] in seen_names or seen_names.add(l["name"]))]

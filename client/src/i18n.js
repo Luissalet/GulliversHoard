@@ -120,9 +120,11 @@ const D = {
   l_paths: ["Caminos y sendas", "Paths and trails"],
   l_paths_help: ["En la ciudad, los de parques y bosques; con «todo el campo en verde», todas las sendas, también por la roca y la nieve. Dejan ver el terreno.", "In a town, the ones in parks and woods; with «All open land green» on, every trail, over rock and snow too. They show the ground."],
   l_arches: ["Puentes con arcos y pilas", "Bridges on arches and piers"],
-  l_arches_help: ["Apagado: un bloque macizo hasta el agua.", "Off: a solid block down to the water."],
+  l_arches_help: ["Apagado: un bloque macizo hasta el agua; los pasos sobre calles y vías, solo el tablero.", "Off: a solid block down to the water; bridges over streets and railways, just the deck."],
   l_zones: ["Nieve y roca", "Snow and rock"],
   l_zones_help: ["Cumbres nevadas y pendientes de roca como colores aparte.", "Snowy summits and rocky slopes as colours of their own."],
+  l_ground_photo: ["Roca, prados y bosques desde la ortofoto", "Rock, meadows and woods from the aerial photo"],
+  l_ground_photo_help: ["Montaña en España: lee en la ortofoto PNOA dónde hay roca desnuda, prado o bosque; donde no se ve claro, roca por pendiente.", "Mountains in Spain: reads on the PNOA aerial photo where there is bare rock, meadow or wood; where it is unclear, rock by slope."],
   roofs: ["Tejados", "Roofs"],
   l_meadows: ["Todo el campo en verde", "All open land green"],
   l_meadows_help: ["Para montaña y campo: el verde cubre todo lo que no es roca, nieve, agua o calle.", "For mountains and countryside: green covers everything that is not rock, snow, water or road."],
@@ -270,7 +272,7 @@ const D = {
   delete_msg: ["Se borran sus parámetros y todos sus archivos generados.", "Its parameters and every generated file are deleted."],
   details: ["Fuentes y detalles", "Sources and details"],
   dem_used: ["Relieve: {src}, {res} m por muestra.", "Elevation: {src}, {res} m per sample."],
-  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes.", "{roads} streets and rails, {water} water bodies, {bridges} bridges."],
+  drawn: ["{roads} calles y vías, {water} masas de agua, {bridges} puentes ({overpasses} sobre calles, vías o barrancos), {weirs} azudes y presas.", "{roads} streets and rails, {water} water bodies, {bridges} bridges ({overpasses} over streets, railways or ravines), {weirs} weirs and dams."],
   contours_every: ["Curvas de nivel cada {m} m.", "Contour lines every {m} m."],
 
   // settings

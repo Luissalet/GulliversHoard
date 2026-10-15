@@ -69,6 +69,8 @@ class ModelParams(BaseModel):
     zones: bool = Field(True, description="Snow on high summits and bare rock on steep slopes as their own colours.")
     snow_m: float = Field(-1.0, ge=-1, le=9000, description="Snow line in metres (-1 = automatic on high mountains, 0 = none).")
     rock_slope_deg: float = Field(34.0, ge=10, le=80, description="Slopes steeper than this are bare rock (zones on).")
+    ground_from_photo: bool = Field(True, description="Mountains in Spain: bare rock, meadows and woods read from the PNOA aerial "
+                                    "photo (where it is unclear, rock by slope); off: rock by slope only.")
     meadows: bool = Field(False, description="Colour all open land green (mountains and countryside), not only mapped parks and woods.")
     max_relief_ratio: float = Field(0.3, ge=0.05, le=2.0, description="The relief is kept at most this share of the model's longest "
                                                                          "side, lowering the vertical exaggeration if needed.")

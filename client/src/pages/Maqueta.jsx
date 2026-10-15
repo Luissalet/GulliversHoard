@@ -183,7 +183,7 @@ export default function Maqueta({ param }) {
             <summary className="help">{t("details")}</summary>
             <div className="help space-y-1">
               <div>{t("dem_used", { src: report.dem?.source, res: num(report.dem?.res_m, 1, lang) })}</div>
-              <div>{t("drawn", { roads: report.roads_drawn, water: report.water_pieces, bridges: report.bridges })}</div>
+              <div>{t("drawn", { roads: report.roads_drawn, water: report.water_pieces, bridges: report.bridges, overpasses: report.overpasses ?? 0, weirs: report.weirs ?? 0 })}</div>
               {report.contour_interval_m > 0 && <div>{t("contours_every", { m: report.contour_interval_m })}</div>}
               {(report.notes || []).map((n, i) => <div key={i}>• {n}</div>)}
               <div>{(report.attribution || []).join(" · ")}</div>

@@ -1,7 +1,7 @@
 """An invented town for the demo mode (``GULLIVER_FAKE=1``) and the tests: hills, a river with a bridge, a lake with an
 island (a multipolygon whose outer ring is split in two ways), blocks of buildings with and without heights, a courtyard
 building, streets of several classes, a railway with a bridge, a park with paths, a pond and trees, a forest, a church
-drawn by its 3D parts (a spire on its tower) and a house with a hipped roof. It is laid out around the centre of
+drawn by its 3D parts (a spire on its tower), a house with a hipped roof and a weir across the river. It is laid out around the centre of
 whatever area is asked for, in the same Overpass JSON the real service answers, so the whole pipeline runs without the
 network."""
 
@@ -119,6 +119,7 @@ def town(proj: Projector) -> dict[str, Any]:
     way(north + south, {"waterway": "riverbank"}, closed=True)
     way([(x, 0.1 * x) for x in xs], {"waterway": "river", "name": "Río Demo"})
     way([(500 + 10 * k, 200 + 60 * k) for k in range(20)], {"waterway": "stream"})
+    way([(-1000, -140), (-1000, -60)], {"waterway": "weir", "name": "Azud Demo"})
     # lake with an island: the outer ring split in two ways (tests the stitching)
     ring = [(-700 + 160 * math.cos(t), 450 + 110 * math.sin(t)) for t in np.linspace(0, 2 * math.pi, 33)[:-1]]
     half = len(ring) // 2

@@ -17,6 +17,7 @@ from .http import Fetcher
 
 PNOA_WMS = "https://www.ign.es/wms-inspire/pnoa-ma"
 ATTRIBUTION = "Árboles detectados en la ortofoto PNOA © Instituto Geográfico Nacional (CC BY 4.0)"
+COVER_ATTRIBUTION = "Roca, prados y bosques leídos de la ortofoto PNOA © Instituto Geográfico Nacional (CC BY 4.0)"
 BOXES = [(-9.6, 35.8, 4.6, 44.0), (-18.4, 27.5, -13.2, 29.6)]
 TILE_PX = 2000
 M_PER_PX = 0.5
@@ -74,6 +75,28 @@ def canopy(rgb: np.ndarray) -> np.ndarray:
     bright = ndimage.uniform_filter(f.max(axis=2), 5)
     mask = (exg > 0.03) & (bright < 112)
     return ndimage.binary_opening(mask, iterations=2)
+
+
+def cover(rgb: np.ndarray) -> dict[str, np.ndarray]:
+    """What covers the ground of a mountain, from the colour of the photo at a few metres a pixel (smoothed over 3 px):
+    ``veg`` green (meadows, woods), ``wood`` dark green (woods; very dark pixels are shadow, not wood), ``dry`` brownish
+    (dry grass, heath: meadow on the model) and ``bare`` bright neutral grey (rock, scree). Shadows and anything else
+    are in none of them."""
+    from scipy import ndimage
+
+    f = rgb.astype(np.float32)
+    r, g, b = f[..., 0], f[..., 1], f[..., 2]
+    smooth = lambda a: ndimage.uniform_filter(a, 3)  # noqa: E731
+    hi, lo = f.max(axis=2), f.min(axis=2)
+    exg = smooth((2 * g - r - b) / (r + g + b + 1.0))
+    bright = smooth(hi)
+    sat = smooth((hi - lo) / (hi + 1.0))
+    warm = smooth(r - b)
+    veg = exg > 0.025
+    wood = (exg > 0.04) & (bright > 50) & (bright < 100)
+    dry = ~veg & (warm > 12) & (sat > 0.10)
+    bare = ~veg & ~dry & (bright > 100) & (sat < 0.15)
+    return {"veg": veg, "wood": wood, "dry": dry, "bare": bare}
 
 
 def trees(rgb: np.ndarray, bbox: tuple[float, float, float, float], projector: Any, *, min_crown_m: float = 2.5,

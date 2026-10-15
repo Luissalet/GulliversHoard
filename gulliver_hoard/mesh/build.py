@@ -55,6 +55,9 @@ PART_LABELS = {
 }
 SKIN_MM = 0.6                 # thickness of a colour layer on top of the terrain
 BRIDGE_DECK_MM = 0.5          # thickness of a bridge deck over its arches
+OVERPASS_DECK_MM = 0.35       # a bridge off the water (over a street, a railway) is thinner: the clearance under it is small
+OVERPASS_DIP_MM = 0.15        # ...and drawn when the ground under it is at least its thickness plus this below the deck
+WEIR = {"weir": (0.4, 3.0, 0.25), "dam": (0.6, 8.0, 0.6)}   # kind -> (narrowest mm, real width m, top above the water mm)
 ROAD_GAP_MM = 0.18            # ground narrower than twice this between two roads becomes road
 ROAD_ISLAND_MM2 = 0.8         # traffic islands smaller than this become road
 MIN_BUILDING_ABS_MM2 = 0.06   # below this a building is never drawn, whatever block it belongs to
@@ -540,12 +543,15 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         water_solid = S.intersect(water_solid, S.prism(model_box, -1.0, over_top + 10.0))
     terrain_wet = S.subtract(terrain, [cut]) if not cut.is_empty() else terrain
 
-    # 6. bridges over water: a deck carried on piers and round arches (or a solid causeway when arches are off) ----------
-    spans: list[tuple[Any, Any, float, float, float]] = []      # (line, deck shape, width, deck height, water level)
-    if p.bridges and water_geom is not None and bridge_lines:
+    # 6. bridges: over water a deck carried on piers and round arches (or a solid causeway when arches are off); off the
+    # water (over a street, a railway, a ravine) the elevation model has no bridge, only the dip under it, so the deck is
+    # drawn when the ground under it falls far enough below its ends, on piers and arches standing on that ground
+    spans: list[tuple[Any, Any, float, float, float, bool]] = []   # (line, deck shape, width, deck, level under it, wet)
+    if p.bridges and bridge_lines:
         for line, width, kind in bridge_lines:
-            if line is None or not line.intersects(water_geom):
+            if line is None or line.is_empty:
                 continue
+            wet_span = water_geom is not None and line.intersects(water_geom)
             ends = np.array([line.coords[0], line.coords[-1]])
             deck = float(_sample(Z, xs, ys, ends[:, 0], ends[:, 1]).max())
             if kind == "rail":
@@ -554,13 +560,21 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 deck += p.road_depth_mm
             elif p.roads == "engraved":
                 deck -= p.road_depth_mm      # the deck carries on the groove of the road
-            over = line.intersection(water_geom)
-            probe = detail.along([g for g in getattr(over, "geoms", [over]) if g.geom_type == "LineString"], 0.5)
-            surface = level_grid if level_grid is not None else Z0
-            level = float(_sample(surface, xs, ys, probe[:, 0], probe[:, 1]).min()) if len(probe) else base
+            if wet_span:
+                over = line.intersection(water_geom)
+                probe = detail.along([g for g in getattr(over, "geoms", [over]) if g.geom_type == "LineString"], 0.5)
+                surface = level_grid if level_grid is not None else Z0
+                level = float(_sample(surface, xs, ys, probe[:, 0], probe[:, 1]).min()) if len(probe) else base
+            else:
+                probe = detail.along([line.intersection(model_box)], 0.25)
+                if not len(probe):
+                    continue
+                level = float(_sample(Z, xs, ys, probe[:, 0], probe[:, 1]).min())
+                if deck - OVERPASS_DECK_MM - level < OVERPASS_DIP_MM:
+                    continue                 # the ground fills it: the road just runs over it
             shape = line.buffer(width / 2.0 + 0.15, cap_style="flat").intersection(model_box)
             if not shape.is_empty:
-                spans.append((line, shape, width + 0.3, deck, level))
+                spans.append((line, shape, width + 0.3, deck, level, wet_span))
     # bridges that touch share one deck height (two decks a hair apart would leave a sliver step between them)
     group = list(range(len(spans)))
     def root(i: int) -> int:
@@ -578,9 +592,16 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     bridges = []
     arch_span = min(10.0, max(3.0, 28.0 * k))
     arched = 0
-    for i, (line, shape, width, _deck, level) in enumerate(spans):
+    for i, (line, shape, width, _deck, level, wet_span) in enumerate(spans):
         deck = top_of[root(i)]
-        if p.arches:
+        if not wet_span and (not p.arches or deck - OVERPASS_DECK_MM - level < 0.3):
+            bridges.append(S.prism(shape, deck - OVERPASS_DECK_MM, deck))   # a plain deck on its ends: the road under stays open
+        elif not wet_span:
+            clipped = line.intersection(model_box.buffer(-0.01))
+            for piece in [g for g in getattr(clipped, "geoms", [clipped]) if g.geom_type == "LineString" and g.length > 0.2]:
+                solid = detail.arch_bridge(piece, width, deck, OVERPASS_DECK_MM, level, 0.3, arch_span)
+                bridges.append(S.intersect(solid, S.prism(model_box, -1.0, deck + 1.0)))
+        elif p.arches:
             clipped = line.intersection(model_box.buffer(-0.01))
             pieces = [g for g in getattr(clipped, "geoms", [clipped]) if g.geom_type == "LineString" and g.length > 0.2]
             for piece in pieces:
@@ -589,6 +610,29 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             arched += 1 if deck - BRIDGE_DECK_MM - level >= 0.3 else 0
         else:
             bridges.append(S.prism(shape, 0.0, deck))
+    overpasses = sum(1 for sp in spans if not sp[5])
+
+    # weirs and dams: a low wall across the water (the level around it stays as it is), in the terrain's colour
+    weir_shapes = []
+    if water_geom is not None and level_grid is not None and feats.weirs:
+        reach = water_geom.buffer(0.3)
+        for geom, kind in feats.weirs:
+            narrow, real_w, above = WEIR[kind]
+            g = to_mm(geom)
+            if g is None or g.is_empty:
+                continue
+            band = g if g.geom_type in ("Polygon", "MultiPolygon") else g.buffer(max(narrow, real_w * k) / 2.0, cap_style="flat")
+            band = band.intersection(reach).intersection(model_box)
+            if band.is_empty or band.area < 0.05 or not band.intersects(water_geom):
+                continue
+            inner = band.intersection(water_geom)
+            pts = detail.along([q.exterior for q in S.polygons(inner)], 0.2)
+            if not len(pts):
+                continue
+            lv = _sample(level_grid, xs, ys, pts[:, 0], pts[:, 1])
+            floor = max(float(lv.min()) - p.water_depth_mm - 0.1, 0.4)
+            bridges.append(S.prism(band, floor, float(lv.max()) + above))
+            weir_shapes.append(band)
     bridge_solid = S.union(bridges)
     if not bridge_solid.is_empty():
         water_solid = S.subtract(water_solid, [bridge_solid])
@@ -653,12 +697,37 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof), {dropped} too small")
     buildings = S.union(building_solids)
 
+    # 7b. what covers a mountain, read from the aerial photo (Spain): bare rock, meadow and woods where they really are,
+    # instead of guessing the rock from the slope alone (a steep meadow is green, a gentle limestone plateau is rock)
+    cover = None
+    photo_woods = None
+    if p.ground_from_photo and p.zones and relief_m >= 60.0 and hasattr(sources, "aerial_cover"):
+        try:
+            got = sources.aerial_cover(area.bbox, max(2.0, cell_m / 2.0), progress=clock.log)
+        except GulliverError as exc:
+            got = None
+            notes.append(f"The aerial photo did not load ({exc.message}); rock from the slope only.")
+        if got:
+            masks, (b0, b1, b2, b3) = got
+            h_px, w_px = next(iter(masks.values())).shape
+            glon, glat = proj.inv(X / k - area.width_m / 2.0, Y / k - area.height_m / 2.0)
+            col = np.clip(((np.asarray(glon) - b0) / (b2 - b0) * w_px).astype(int), 0, w_px - 1)
+            row = np.clip(((b3 - np.asarray(glat)) / (b3 - b1) * h_px).astype(int), 0, h_px - 1)
+            cover = {name: m[row, col] for name, m in masks.items()}
+            attribution.append(aerial_mod.COVER_ATTRIBUTION)
+            if p.trees and cover["wood"].any():
+                wood = _below(-_gaussian(cover["wood"].astype(float), 1.0), xs, ys, -0.5)
+                if wood is not None:
+                    keep = [q for q in S.polygons(wood) if q.area >= 4.0 * p.tree_size_mm ** 2]
+                    photo_woods = shapely.union_all(np.array(keep, dtype=object)) if keep else None
+            clock.log("Rock, meadows and woods read from the aerial photo")
+
     # 8. trees ---------------------------------------------------------------------------------------------------------------
     trees_solid = S.EMPTY
     n_trees = 0
     P, R = np.zeros((0, 2)), np.zeros(0)
     seen_from_air = False
-    if p.trees and (feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None):
+    if p.trees and (feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None or photo_woods is not None):
         clock.step(0.62, "Trees")
         crown = p.tree_size_mm
         mapped = []
@@ -696,7 +765,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         blocked_light = shapely.union_all(np.array([g.buffer(crown * 0.2) for g in light], dtype=object)) if light else None
         clip = lambda g: g.intersection(model_box) if g is not None and not g.is_empty else None  # noqa: E731
         seed = int(abs(p.lon * 1e5) + abs(p.lat * 1e5)) % (2 ** 32)
-        P, R = detail.plant(woods=clip(to_mm(feats.woods)), parks=clip(to_mm(feats.parks)), mapped=mapped,
+        woods_mm = to_mm(feats.woods) if feats.woods is not None else None
+        if photo_woods is not None:
+            woods_mm = photo_woods if woods_mm is None else woods_mm.union(photo_woods)
+        P, R = detail.plant(woods=clip(woods_mm), parks=clip(to_mm(feats.parks)), mapped=mapped,
                             rows=[to_mm(l) for l in feats.tree_rows], blocked=blocked, blocked_light=blocked_light,
                             inside=footprint.buffer(-crown * 0.6), crown_mm=crown,
                             density=p.tree_density, rng=np.random.default_rng(seed),
@@ -751,7 +823,15 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 areas.append(("snow", shapely.union_all(np.array(snow, dtype=object))))
             rock = []
             if relief_m >= 60.0:
-                rock.append(_below(-_gaussian(detail.slope_deg(elev, cell_m), 1.0), xs, ys, -p.rock_slope_deg))
+                slope = _gaussian(detail.slope_deg(elev, cell_m), 1.0)
+                if cover is not None:
+                    # rock where the photo shows bare stone (not on the flat floor of a valley), where the photo says
+                    # nothing (shadow) and the slope is steep, and on any cliff
+                    known = cover["veg"] | cover["dry"] | cover["bare"]
+                    bare = (cover["bare"] & (slope >= 10.0)) | (~known & (slope >= p.rock_slope_deg)) | (slope >= 60.0)
+                    rock.append(_below(-_gaussian(bare.astype(float), 1.0), xs, ys, -0.5))
+                else:
+                    rock.append(_below(-slope, xs, ys, -p.rock_slope_deg))
             if feats.rock is not None:
                 rock.append(to_mm(feats.rock))
             rock = [g for g in rock if g is not None and not g.is_empty]
@@ -913,11 +993,14 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "sea": bool(sea.any()),
         "contour_interval_m": interval,
         "bridges": len(spans),
+        "overpasses": overpasses,
+        "weirs": len(weir_shapes),
         "arched_bridges": arched,
         "rails_drawn": len(rail_lines),
         "paths_drawn": len(path_lines),
         "trees": n_trees,
         "trees_from_air": seen_from_air if p.trees else False,
+        "ground_from_photo": cover is not None,
         "roofs": roofs,
         "colour_layers": layers_drawn,
         "tiles": [{"id": t["id"], "size_mm": [round(t["box"][2] - t["box"][0], 1), round(t["box"][3] - t["box"][1], 1)]} for t in tiles],
@@ -930,5 +1013,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     footprints = {"outline": outer, "model": footprint, "buildings": building_shapes, "water": water_geom, "roads": roads_geom,
                   "green": green_mm, "rails": rail_shape, "paths": path_shape, "trees": (P, R) if n_trees else None,
                   "snow": zone_shapes.get("snow"), "rock": zone_shapes.get("rock"),
-                  "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None}
+                  "bridges": shapely.union_all(np.array([sp[1] for sp in spans], dtype=object)) if spans else None,
+                  "weirs": shapely.union_all(np.array(weir_shapes, dtype=object)) if weir_shapes else None}
     return BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole)

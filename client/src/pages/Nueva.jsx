@@ -285,6 +285,7 @@ export default function Nueva({ query }) {
           <Toggle label={t("l_paths")} checked={form.paths} onChange={(v) => set({ paths: v })} hint={t("l_paths_help")} />
           <Toggle label={t("l_arches")} checked={form.arches} onChange={(v) => set({ arches: v })} hint={t("l_arches_help")} />
           <Toggle label={t("l_zones")} checked={form.zones} onChange={(v) => set({ zones: v })} hint={t("l_zones_help")} />
+          {form.zones && <Toggle label={t("l_ground_photo")} checked={form.ground_from_photo} onChange={(v) => set({ ground_from_photo: v })} hint={t("l_ground_photo_help")} />}
           <Toggle label={t("l_meadows")} checked={form.meadows} onChange={(v) => set({ meadows: v })} hint={t("l_meadows_help")} />
           <div className="grid grid-cols-2 gap-3">
             <label className="block">

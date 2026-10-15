@@ -275,6 +275,8 @@ def test_river_top_has_no_walls_inside_the_water():
     assert bridges is not None
     if len(walls):
         inside &= ~shapely.contains_xy(bridges.buffer(0.6), walls[:, 0], walls[:, 1])
+        if r.footprints.get("weirs") is not None:                       # the weir is a wall across the water on purpose
+            inside &= ~shapely.contains_xy(r.footprints["weirs"].buffer(0.6), walls[:, 0], walls[:, 1])
     assert inside.sum() == 0
 
 
@@ -304,4 +306,112 @@ def test_trails_cross_the_rock_on_open_land():
     assert trail is not None and trail.length > 0
     # the trail crosses the ridge, where the slope is rock, and the rock layer leaves it showing the ground
     assert trail.intersects(rock.buffer(2.0)) and trail.intersection(rock).area < 1e-6
+    assert closed(r.parts["rock"]) and closed(r.single)
+
+
+class Cutting(FakeSources):
+    """A flat plain with a road sunk in a cutting (north-south), a bridge carrying a street over it, a canal (east-west)
+    with a weir across it."""
+
+    def dem(self, bbox, want_res_m, **_):
+        from gulliver_hoard.geo import Projector, metres_per_degree
+        lon_min, lat_min, lon_max, lat_max = bbox
+        lon0, lat0 = (lon_min + lon_max) / 2, (lat_min + lat_max) / 2
+        proj = Projector(lon0, lat0)
+        kx, ky = metres_per_degree(lat0)
+        res = 5.0
+        step = (res / kx, res / ky)
+        cols, rows = int((lon_max - lon_min) / step[0]) + 3, int((lat_max - lat_min) / step[1]) + 3
+        lons = lon_min - step[0] + np.arange(cols) * step[0]
+        lats = lat_max + step[1] - np.arange(rows) * step[1]
+        x, y = proj.fwd(*np.meshgrid(lons, lats))
+        z = 200.0 - 12.0 * np.exp(-(x / 22.0) ** 6) - 6.0 * np.exp(-((y - 300.0) / 30.0) ** 6) + 0.002 * x
+        return Composite(DemGrid(z.astype(np.float32), "lonlat", (lons[0], lats[0]), step, source="cut", res_m=res), None)
+
+    def osm(self, bbox, **_):
+        from gulliver_hoard.geo import Projector
+        proj = Projector((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+
+        def way(i, pts, tags):
+            return {"type": "way", "id": i, "tags": tags,
+                    "geometry": [dict(zip(("lon", "lat"), proj.inv(x, y))) for x, y in pts]}
+
+        canal = [(-900, 285), (900, 285), (900, 315), (-900, 315), (-900, 285)]
+        return {"elements": [
+            way(1, [(0, -900), (0, 900)], {"highway": "primary"}),                                 # in the cutting
+            way(2, [(-900, -200), (-40, -200)], {"highway": "secondary"}),
+            way(3, [(-40, -200), (40, -200)], {"highway": "secondary", "bridge": "yes", "layer": "1"}),
+            way(4, [(40, -200), (900, -200)], {"highway": "secondary"}),
+            way(5, canal, {"natural": "water", "water": "canal"}),
+            way(6, [(500, 270), (500, 330)], {"waterway": "weir"}),
+        ]}
+
+
+def _heights_at(solid, x, y):
+    """Heights where a vertical line at (x, y) crosses the surface of the solid, top first."""
+    v, t = S.mesh_arrays(solid)
+    tri = v[t].astype(np.float64)
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    det = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
+    ok = np.abs(det) > 1e-12
+    l1 = ((b[:, 1] - c[:, 1]) * (x - c[:, 0]) + (c[:, 0] - b[:, 0]) * (y - c[:, 1])) / np.where(ok, det, 1.0)
+    l2 = ((c[:, 1] - a[:, 1]) * (x - c[:, 0]) + (a[:, 0] - c[:, 0]) * (y - c[:, 1])) / np.where(ok, det, 1.0)
+    l3 = 1.0 - l1 - l2
+    inside = ok & (l1 >= 0) & (l2 >= 0) & (l3 >= 0)
+    z = l1 * a[:, 2] + l2 * b[:, 2] + l3 * c[:, 2]
+    return np.sort(z[inside])[::-1]
+
+
+def test_bridge_over_a_cutting_and_a_weir_across_the_water():
+    p = make(color="color", width_m=1600, height_m=1600, size_mm=110, resolution_mm=0.4, buildings=False, trees=False, z_exag=1.0)
+    r = build(p, Cutting(), name="Corte")
+    assert r.stats["overpasses"] == 1 and r.stats["weirs"] == 1
+    assert all(closed(m) for m in r.parts.values()) and closed(r.single)
+    k = p.scale_mm_per_m
+    W, H = r.stats["size_mm"][:2]
+    cx, by = W / 2.0, H / 2.0 - 200 * k                                  # where the bridge crosses the cutting
+    zs = _heights_at(r.single, cx + 0.05, by + 0.05)
+    # straight down through the bridge: deck top, deck underside, then (after air) the road in the cutting, then the bottom
+    assert len(zs) >= 4 and zs[1] - zs[2] > 0.15, zs
+    weir = r.footprints["weirs"]
+    assert weir is not None and S.intersect(r.parts["water"], S.prism(weir.buffer(-0.05), -1, 50)).volume() < 1e-3
+
+
+def test_mountain_ground_read_from_the_photo():
+    class PhotoAlps(FakeSources):
+        def dem(self, bbox, want_res_m, **_):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            u = np.linspace(-1, 1, 200)
+            U, V = np.meshgrid(u, u)
+            data = (900.0 + 1500.0 * np.exp(-(V ** 2) / 0.08)).astype(np.float32)            # a ridge west-east
+            step = ((lon_max - lon_min) / 199, (lat_max - lat_min) / 199)
+            return Composite(DemGrid(data, "lonlat", (lon_min, lat_max), step, source="alps", res_m=25), None)
+
+        def osm(self, bbox, **_):
+            return {"elements": []}
+
+        def aerial_cover(self, bbox, m_per_px, **_):
+            h, w = 100, 100
+            veg = np.zeros((h, w), bool)
+            veg[:, : w // 2] = True                         # the west half is green (meadow), with a wood in it
+            wood = np.zeros((h, w), bool)
+            wood[60:80, 10:30] = True
+            bare = ~veg                                       # the east half is bare stone
+            return {"veg": veg, "wood": wood, "dry": np.zeros((h, w), bool), "bare": bare}, bbox
+
+    from gulliver_hoard.params import PRESETS
+    p = ModelParams(**{**PRESETS["landscape"], "lon": 7.0, "lat": 46.0, "width_m": 6000, "height_m": 6000, "size_mm": 100,
+                       "resolution_mm": 0.8, "color": "color", "z_exag": 2.0, "contours_m": 0, "snow_m": 0})
+    r = build(p, PhotoAlps(), name="Foto")
+    assert r.stats["ground_from_photo"] and any("ortofoto" in a for a in r.attribution)
+    rock = r.footprints["rock"]
+    W, H = r.stats["size_mm"][:2]
+    from shapely.geometry import box as B
+    west, east = B(0, 0, W / 2 - 2, H), B(W / 2 + 2, 0, W, H)
+    # the steep green west is not rock (the slope alone would have made it rock); the bare east is, flanks included
+    assert rock.intersection(west).area < 0.02 * west.area
+    assert rock.intersection(east).area > 0.4 * east.area
+    assert r.stats["trees"] > 0                                               # the wood on the photo has trees
+    off = build(p.model_copy(update={"ground_from_photo": False}), PhotoAlps(), name="Foto")
+    assert not off.stats["ground_from_photo"] and off.footprints["rock"].intersection(west).area > 0.1 * west.area
     assert closed(r.parts["rock"]) and closed(r.single)
