@@ -129,7 +129,7 @@ LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
 TERRAIN_TOL_MM = 0.02         # how far the simplified terrain may stray from the elevation grid
-STAGE_VERSION = 6             # bump when the gathered map data changes shape
+STAGE_VERSION = 11             # bump when the gathered map data changes shape
 STAGE_MAX_AGE_S = 7 * 86400
 PLAQUE_MM = 0.6               # the plaque's letters stand this high (and sink as deep into the frame)
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
@@ -575,6 +575,39 @@ def _chamfer(bottom: Any, top: Any, z0: float, z1: float) -> Any:
     return (lo + hi).hull() if S.polygons(bottom) and len(S.polygons(bottom)) == 1 else S.prism(top, z0, z1)
 
 
+def _thin(found: list, min_spacing_m: float) -> list:
+    """Trees (x, y, height_m, crown_m), highest first, no two closer than ``min_spacing_m`` (a small-scale model draws a
+    crown wider than the real one)."""
+    if min_spacing_m <= 0 or len(found) < 2:
+        return list(found)
+    from scipy.spatial import cKDTree
+    F = sorted(found, key=lambda t: -t[2])
+    pts = np.asarray([(t[0], t[1]) for t in F])
+    tree = cKDTree(pts)
+    taken = np.zeros(len(F), dtype=bool)
+    out = []
+    for i in range(len(F)):
+        if taken[i]:
+            continue
+        out.append(F[i])
+        taken[tree.query_ball_point(pts[i], min_spacing_m)] = True
+    return out
+
+
+def _tiered(shape: Any, tiers: list, z0: float, ground_top: float, kv: float, to_mm: Callable[[Any], Any],
+            min_h_mm: float) -> Optional[Manifold]:
+    """A building in levels (``dsm.roof_tiers``: the whole footprint at the lowest height, then the outline of each level
+    above at its own height), as one solid on the model. None when nothing is left to draw."""
+    solids = []
+    for n, (h_m, poly) in enumerate(tiers):
+        top = ground_top + max(float(h_m) * kv, min_h_mm)
+        part = shape if n == 0 else shape.intersection(to_mm(poly) or Polygon())
+        if part is None or part.is_empty or part.area < 0.05:
+            continue
+        solids.append(S.prism(part, z0, top))
+    return S.union(solids) if solids else None
+
+
 def _apply_dsm(feats: Any, heights: np.ndarray, bounds: tuple[float, float, float, float], proj: Any, is_ndsm: bool) -> int:
     """Buildings drawn as plain outlines (no 3D parts mapped) take their roof height from the surface model, and each
     tower or spire found on them becomes a part of its own standing on the roof. Returns how many were measured."""
@@ -587,25 +620,37 @@ def _apply_dsm(feats: Any, heights: np.ndarray, bounds: tuple[float, float, floa
         return 0
     others = shapely.union_all(np.array([b.shape for b in feats.buildings], dtype=object))
     found = dsm_mod.building_heights(heights, bounds, proj, [b.shape for b in outlines], is_ndsm=is_ndsm, others=others,
-                                     ground_pct=8.0)
+                                     ground_pct=8.0, patches=True)
     n = 0
     towers = []
     for b, h in zip(outlines, found):
         if not h or not h.get("roof_m") or h["roof_m"] < 2.5:
             continue
         roof = float(h["roof_m"])
-        # a height already known (cadastral floors, a mapped height) wins over the surface model, which can be years old
-        # or blurred: only a roof far above it (a block grown since) replaces it. Towers are added either way.
-        keep = not b.estimated and b.height_m and roof <= b.height_m * 1.25 + 3.0
+        # a height already known (cadastral floors, a mapped height) is checked against the surface model, which can be
+        # years old or blurred: when they agree the laser's roof (its real height and shape) is drawn; a roof far above it
+        # (a block grown since) replaces it too; a roof far below it (the model older than the building, or missing it)
+        # leaves the known height alone. Towers are added either way.
+        known = not b.estimated and bool(b.height_m)
+        keep = known and roof < b.height_m * 0.6 - 2.0
         if not keep:
             b.height_m = roof
             b.estimated = False
             n += 1
-        # a pitched roof shows as metres between the eaves and the ridge: on a house-sized footprint draw it gabled
-        pitch = roof - float(h.get("eaves_m") or roof)
-        if not keep and b.roof in ("", "flat") and pitch >= 2.0 and b.shape.area <= 600.0 and b.shape.area >= 0.75 * b.shape.minimum_rotated_rectangle.area:
-            b.roof = "gabled"
-            b.roof_height_m = min(pitch * 1.3, roof * 0.6)
+            fit = h.get("fit")
+            if b.roof in ("", "flat") and fit is not None:          # the pitched roof the laser saw: its shape and slope
+                b.roof = fit["shape"]
+                b.roof_across = bool(fit["across"])
+                b.roof_height_m = float(fit["ridge_m"] - fit["eaves_m"])
+                b.height_m = float(fit["ridge_m"])
+                b.roof_source = "laser"
+            elif b.roof in ("", "flat") and h.get("tiers"):
+                b.roof = "flat"
+                b.roof_tiers = h["tiers"]                            # a big roof in levels
+                b.height_m = float(max(t[0] for t in h["tiers"]))
+                b.roof_source = "laser"
+            elif b.roof == "" and h.get("flat"):
+                b.roof = "flat"                                      # the laser saw it flat: no pitched roof guessed
         for poly, top in h.get("towers") or []:
             if top - b.height_m < 4.0 or poly.is_empty:
                 continue
@@ -799,15 +844,24 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                     clock.log(f"{len(feats.parcels)} farm parcels from the cadastre")
         # real heights from a laser surface model where one is open: every roof at its height, towers and spires on top
         dsm_used = 0
-        if (p.buildings and p.dsm_heights and feats.buildings and hasattr(sources, "dsm") and area.km2 <= 25.0
+        if (p.dsm_heights and ((p.buildings and feats.buildings) or p.trees) and hasattr(sources, "dsm") and area.km2 <= 25.0
                 and dsm_mod.provider_for(area.bbox, keys=getattr(sources, "keys", None)) is not None and k >= 0.012):
             try:
                 hts, hb, dsm_attr, is_ndsm = sources.dsm(area.bbox_padded(30.0), res_m=1.0 if area.km2 <= 9.0 else 2.0,
                                                         progress=clock.log)
-                dsm_used = _apply_dsm(feats, hts, hb, proj, is_ndsm)
-                if dsm_used:
+                if p.buildings and feats.buildings:
+                    dsm_used = _apply_dsm(feats, hts, hb, proj, is_ndsm)
+                    if dsm_used:
+                        clock.log(f"{dsm_used} buildings measured on the surface model")
+                if p.trees:
+                    blds = (shapely.union_all(np.array([b.shape for b in feats.buildings], dtype=object))
+                            if feats.buildings else None)
+                    half_w, half_h = area.width_m / 2.0, area.height_m / 2.0
+                    feats.laser_trees = dsm_mod.trees(hts, hb, proj, (-half_w, -half_h, half_w, half_h), is_ndsm=is_ndsm,
+                                                      buildings=blds, cell_m=1.0 if area.km2 <= 9.0 else 2.0)
+                    clock.log(f"{len(feats.laser_trees)} trees seen by the laser")
+                if dsm_used or feats.laser_trees:
                     attribution.append(dsm_attr)
-                    clock.log(f"{dsm_used} buildings measured on the surface model")
             except GulliverError as exc:
                 notes.append(f"The surface model was not used ({exc.message}).")
             except Exception as exc:  # noqa: BLE001
@@ -1263,6 +1317,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     dropped = 0
     sink = max(0.3, p.road_depth_mm + 0.1, p.contour_depth_mm + 0.1)   # below any groove next to the walls
     roofs = 0
+    laser_roofs = 0
     if p.buildings and feats.buildings:
         clock.step(0.55, "Buildings")
         cands = []
@@ -1307,8 +1362,17 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             else:
                 z1 = float(ground.max()) + max((bld.height_m - (bld.min_height_m if bld.part else 0.0)) * kv,
                                                p.min_building_height_mm)
-            roof = detail.default_roof(bld.kind, bld.roof, p.roofs)
-            roof_h = bld.roof_height_m * kv if bld.roof_height_m is not None else None
+            if bld.roof_tiers and p.laser_roofs:
+                solid = _tiered(shape, bld.roof_tiers, z0, float(ground.max()), kv, to_mm, p.min_building_height_mm)
+                if solid is not None:
+                    laser_roofs += 1
+                    building_solids.append(solid)
+                    building_shapes.append(shape)
+                    building_tall.append(p.tall_buildings_m > 0 and bld.height_m >= p.tall_buildings_m)
+                    continue
+            measured = bld.roof_source == "laser"
+            roof = detail.default_roof(bld.kind, bld.roof if (p.laser_roofs or not measured) else "", p.roofs)
+            roof_h = bld.roof_height_m * kv if bld.roof_height_m is not None and (p.laser_roofs or not measured) else None
             if roof in detail.POINTED and bld.part and bld.min_height_m > 2.0 and roof_h is None:
                 roof_h = z1 - z0                                # the whole part is the spire
             solid = detail.building_solid(shape, z0, z1, roof, roof_h, bld.roof_across, kv) if p.roofs != "flat" else \
@@ -1317,7 +1381,9 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
             building_solids.append(solid)
             building_shapes.append(shape)
             building_tall.append(p.tall_buildings_m > 0 and bld.height_m >= p.tall_buildings_m)
-        clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof), {dropped} too small")
+            laser_roofs += 1 if measured and p.laser_roofs and p.roofs != "flat" else 0
+        clock.log(f"{len(building_solids)} buildings on the model ({roofs} with a roof, {laser_roofs} shaped by the laser), "
+                  f"{dropped} too small")
     # the owner's place: the building under the point (with its towers) in gold, or a marker standing there
     highlight = S.EMPTY
     highlight_kind = ""
@@ -1410,8 +1476,12 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 trees_from.append(label)
             return int(ok.sum())
 
+        # the laser: every tree with its height and where it really stands (first, so the other surveys only fill gaps)
+        if feats.laser_trees and p.tree_source == "auto" and fine:
+            n = add_known(_thin(feats.laser_trees, crown / k * 0.8), "laser")
+            clock.log(f"{n} trees seen by the laser")
         # the global canopy height map: every tree with its height, anywhere on Earth
-        if want_canopy:
+        if want_canopy and "laser" not in trees_from:
             try:
                 chm, chm_bounds = sources.canopy(area.bbox, progress=clock.log)
                 found = canopy_mod.trees(chm, chm_bounds, proj, min_spacing_m=crown / k * 0.8)
@@ -1435,9 +1505,9 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 if n:
                     attribution.append(aerial_mod.ATTRIBUTION)
                 clock.log(f"{n} trees seen on the aerial photo")
-        seen_from_air = "canopy" in trees_from or "aerial" in trees_from
+        seen_from_air = bool({"canopy", "aerial", "laser"} & set(trees_from))
         house_shapes = shapely.union_all(np.array(building_shapes, dtype=object)) if building_shapes else None
-        light = [g for g in (house_shapes, water_geom, rail_shape) if g is not None]
+        light = [g for g in (house_shapes, water_geom, sea_poly, rail_shape) if g is not None]   # never in the river or the sea
         blockers = light + [g for g in (road_shape, path_shape, track_shape) if g is not None]
         blocked = shapely.union_all(np.array([g.buffer(crown * 0.3) for g in blockers], dtype=object)) if blockers else None
         blocked_light = shapely.union_all(np.array([g.buffer(crown * 0.2) for g in light], dtype=object)) if light else None
@@ -1779,6 +1849,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "plaque": plaque_drawn,
         "tile_cuts": "streets" if tiles and tile_list is not None else "straight",
         "roofs": roofs,
+        "laser_roofs": laser_roofs,
         "colour_layers": layers_drawn,
         "tiles": [{"id": t["id"], "size_mm": [round(t["box"][2] - t["box"][0], 1), round(t["box"][3] - t["box"][1], 1)]} for t in tiles],
         "pins": len(pins),

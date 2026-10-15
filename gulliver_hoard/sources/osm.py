@@ -81,6 +81,8 @@ class Building:
     roof_height_m: Optional[float] = None    # None: worked out from the footprint for a pointed roof
     roof_across: bool = False                # gabled ridge across the long side instead of along it
     part: bool = False    # a building:part (a tower, a spire...) rather than a whole building
+    roof_source: str = ""   # "laser" when the roof's shape (pitch or levels) was measured, not mapped or guessed
+    roof_tiers: Any = None  # levels of a big flat roof the laser saw: [(height_m, polygon in metres)], see dsm.roof_tiers
 
 
 @dataclass
@@ -109,6 +111,7 @@ class Features:
     rock: Any = None              # bare rock, scree, shingle
     ice: Any = None               # glaciers
     trees: list[tuple[float, float, float, float, str]] = field(default_factory=list)   # (x, y, height_m, crown_m, leaf_type)
+    laser_trees: list[tuple[float, float, float, float]] = field(default_factory=list)   # (x, y, height_m, crown_m) seen by the laser
     needle_woods: Any = None      # woods mapped as needle-leaved (conifers)
     plazas: Any = None            # squares and pedestrian areas
     farmland: list[tuple[Any, str]] = field(default_factory=list)   # (polygon, landuse) one per mapped field or farm

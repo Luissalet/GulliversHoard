@@ -322,6 +322,7 @@ export default function Nueva({ query }) {
           <Toggle label={t("l_meadows")} checked={form.meadows} onChange={(v) => set({ meadows: v })} hint={t("l_meadows_help")} />
           <Toggle label={t("l_plazas")} checked={form.plazas} onChange={(v) => set({ plazas: v })} hint={t("l_plazas_help")} />
           <Toggle label={t("l_dsm")} checked={form.dsm_heights} onChange={(v) => set({ dsm_heights: v })} hint={t("l_dsm_help")} />
+          {form.dsm_heights && <Toggle label={t("l_laser_roofs")} checked={form.laser_roofs !== false} onChange={(v) => set({ laser_roofs: v })} hint={t("l_laser_roofs_help")} />}
           <Toggle label={t("l_landcover")} checked={form.landcover} onChange={(v) => set({ landcover: v })} hint={t("l_landcover_help")} />
           <Toggle label={t("l_fields")} checked={form.fields} onChange={(v) => set({ fields: v })} hint={t("l_fields_help")} />
           {form.fields && <Toggle label={t("l_field_rows")} checked={form.field_rows} onChange={(v) => set({ field_rows: v })} hint={t("l_field_rows_help")} />}

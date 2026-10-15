@@ -348,7 +348,8 @@ def test_known_heights_survive_the_surface_model_and_still_get_towers():
     from gulliver_hoard.sources.osm import Building, Features
     h, bounds, proj = synthetic()
     foot = box(20, -20, 60, 20)
-    for known, estimated, want in ((18.0, False, 18.0),     # cadastral floors close to the laser: kept
+    for known, estimated, want in ((45.0, False, 45.0),     # the laser far below the cadastre (older than it): kept
+                                   (18.0, False, 20.0),     # cadastre and laser agree: the laser's own height
                                    (9.0, False, 20.0),      # a block grown since the cadastre: the laser wins
                                    (9.0, True, 20.0)):      # a guess: the laser wins
         feats = Features()
@@ -357,3 +358,81 @@ def test_known_heights_survive_the_surface_model_and_still_get_towers():
         b = feats.buildings[0]
         assert b.height_m == pytest.approx(want, abs=1.0) and not b.estimated
         assert any(q.part and q.kind == "tower" for q in feats.buildings[1:])
+
+
+def test_roof_fit_tells_the_shape_and_slope():
+    from shapely.geometry import box as sbox
+    rng = np.random.default_rng(4)
+    xs, ys = np.meshgrid(np.arange(0.25, 20, 0.5), np.arange(0.25, 10, 0.5))
+    x, y = xs.ravel(), ys.ravel()
+    poly = sbox(0, 0, 20, 10)                                            # 20 x 10 m, long side along x
+    noise = rng.normal(0, 0.12, x.shape)
+    gabled = 7.0 + 0.6 * (5.0 - np.abs(y - 5.0)) + noise                 # ridge along the building, 10 m high
+    f = dsm.roof_fit(x, y, gabled, poly)
+    assert f["shape"] == "gabled" and not f["across"] and abs(f["ridge_m"] - 10.0) < 0.5 and abs(f["eaves_m"] - 7.0) < 0.5
+    across = 7.0 + 0.4 * (10.0 - np.abs(x - 10.0)) + noise              # ridge across it
+    f = dsm.roof_fit(x, y, across, poly)
+    assert f["shape"] == "gabled" and f["across"]
+    hipped = 7.0 + 0.6 * np.minimum(5.0 - np.abs(y - 5.0), 10.0 - np.abs(x - 10.0)) + noise
+    assert dsm.roof_fit(x, y, hipped, poly)["shape"] == "hipped"
+    assert dsm.roof_fit(x, y, 9.0 + noise, poly) is None                 # flat
+    clutter = 9.0 + rng.normal(0, 1.2, x.shape)                          # machinery everywhere: not a pitched roof
+    assert dsm.roof_fit(x, y, clutter, poly) is None
+
+
+def test_laser_trees_skip_buildings_and_flat_structures():
+    proj = Projector(LON, LAT)
+    res, size = 1.0, 200
+    n = int(size / res)
+    xs = (np.arange(n) + 0.5) * res - size / 2.0
+    X, Y = np.meshgrid(xs, xs[::-1])
+    ground = 3.0 + 0.02 * X                                                   # a gentle slope
+    h = ground.copy()
+    rng = np.random.default_rng(1)
+    trees_at = [(-60, -50, 14.0), (-40, 30, 9.0), (50, -60, 18.0)]
+    for tx, ty, th in trees_at:
+        d = np.hypot(X - tx, Y - ty)
+        crown = np.clip(th * (1 - (d / 4.0) ** 2), 0, None) + rng.uniform(0, 0.6, X.shape) * (d < 4)
+        h = np.maximum(h, ground + crown)
+    h[(X >= 0) & (X < 40) & (Y >= 20) & (Y < 32)] += 7.0                      # a flat bridge deck
+    h[(X >= 20) & (X < 60) & (Y >= -20) & (Y < 0)] += 15.0                     # a building
+    lo, hi = proj.inv(-size / 2.0, -size / 2.0), proj.inv(size / 2.0, size / 2.0)
+    found = dsm.trees(h.astype(np.float32), (lo[0], lo[1], hi[0], hi[1]), proj, (-90, -90, 90, 90),
+                      buildings=box(20, -20, 60, 0))
+    assert len(found) == 3
+    for tx, ty, th in trees_at:
+        best = min(found, key=lambda t: (t[0] - tx) ** 2 + (t[1] - ty) ** 2)
+        assert abs(best[0] - tx) <= 2.5 and abs(best[1] - ty) <= 2.5 and abs(best[2] - th) < 3.0 and best[3] >= 3.0
+
+
+def test_roof_tiers_drop_the_machinery_and_keep_the_levels():
+    from rasterio.transform import Affine
+    from shapely.geometry import box as sbox
+    cell = 1.0
+    yy, xx = np.mgrid[0:60, 0:60]
+    own = (xx >= 5) & (xx < 55) & (yy >= 5) & (yy < 55)
+    poly = sbox(5, 5, 55, 55)                                            # metres: x right, y up from the bottom row
+    T = Affine(cell, 0.0, 0.0, 0.0, -cell, 60.0)
+    rng = np.random.default_rng(0)
+    roof = np.full(own.shape, 12.0) + rng.normal(0, 0.15, own.shape)
+    for cx, cy in ((15, 15), (40, 20), (25, 45)):                       # air units 2 m wide, 2.5 m tall
+        roof[cy:cy + 2, cx:cx + 2] += 2.5
+    rel = np.where(own, roof, 0.3).astype(np.float32)
+    assert dsm.roof_tiers(rel, own, cell, 12.3, T, poly) is None        # one level once the machinery is gone
+    tiered = roof.copy()
+    tiered[5:30, 5:55] += 9.0                                            # a block 9 m taller over the north half
+    rel = np.where(own, tiered, 0.3).astype(np.float32)
+    tiers = dsm.roof_tiers(rel, own, cell, 21.0, T, poly)
+    assert len(tiers) == 2 and abs(tiers[0][0] - 12.0) < 0.6 and abs(tiers[1][0] - 21.0) < 0.6
+    top = tiers[1][1]
+    assert abs(top.area - 50 * 25) < 200 and top.bounds[1] >= 28 and len(top.exterior.coords) <= 8   # straight walls
+
+
+def test_tiered_building_is_one_solid():
+    from shapely.geometry import box as sbox
+    from gulliver_hoard.mesh.build import _tiered
+    shape = sbox(0, 0, 50, 50)
+    tiers = [(12.0, sbox(0, 0, 50, 50)), (21.0, sbox(0, 25, 50, 50))]
+    solid = _tiered(shape, tiers, 1.0, 2.0, 0.2, lambda g: g.buffer(0) if g is not None else None, 0.5)
+    bb = solid.bounding_box()
+    assert abs(bb[5] - (2.0 + 21.0 * 0.2)) < 1e-6 and solid.volume() > 0

@@ -541,7 +541,7 @@ def _sample_grid(heights: np.ndarray, bounds: tuple[float, float, float, float],
 def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, float], projector: Any, shapes: list, *,
                      is_ndsm: bool = False, ground_ring_m: tuple[float, float] = (2.0, 8.0), others: Any = None,
                      tower_over_m: float = 6.0, tower_min_area_m2: float = 6.0, ground_pct: float = 20.0,
-                     max_cells: int = 40_000_000
+                     max_cells: int = 40_000_000, patches: bool = False
                      ) -> list[Optional[dict]]:
     """For each footprint (shapely polygons in metres of ``projector``) a dict, or None where the model has no data:
 
@@ -554,7 +554,11 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
 
     The ground is 0 for an nDSM; otherwise the ``ground_pct``-th (20th) percentile of the model in the ring ``ground_ring_m`` around the
     footprint, leaving out the area of ``others`` (all the buildings, a shapely geometry; by default the footprints
-    themselves)."""
+    themselves).
+
+    With ``patches``, each also gets what the laser says of its roof: ``fit`` (the pitched roof it saw, ``roof_fit``),
+    else ``tiers`` (the levels of a big flat roof, ``roof_tiers``); ``flat`` when enough was measured to tell it is flat;
+    ``samples``, how many of the model's own cells (not the grid's) fall on it."""
     import rasterio.features
     from rasterio.transform import Affine
     from scipy import ndimage
@@ -581,6 +585,10 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
         W, H = int(math.ceil((maxx - minx) / cell)), int(math.ceil((maxy - miny) / cell))
     G = _sample_grid(heights, bounds, projector, minx, maxy, cell, W, H)
     T = Affine(cell, 0.0, minx, 0.0, -cell, maxy)
+    # the model's own resolution: a coarse one sampled on this grid repeats its values cell after cell
+    pairs = np.isfinite(G[:, 1:]) & np.isfinite(G[:, :-1])
+    same = float(np.mean(G[:, 1:][pairs] == G[:, :-1][pairs])) if pairs.any() else 0.0
+    native = cell / max(0.05, 1.0 - same)
     lab = rasterio.features.rasterize(((shapes[i], i + 1) for i in todo), out_shape=(H, W), transform=T, fill=0, dtype="int32")
     solid = lab > 0
     if others is not None and not others.is_empty:
@@ -658,4 +666,211 @@ def building_heights(heights: np.ndarray, bounds: tuple[float, float, float, flo
             if towers:
                 top = max(top, towers[0][1])
         out[i] = {"roof_m": round(roof, 2), "eaves_m": round(eaves, 2), "top_m": round(top, 2), "towers": towers}
+        if patches:
+            okm = own & fin
+            samples = float(okm.sum()) * (cell / native) ** 2           # what the laser really measured on this roof
+            out[i]["samples"] = round(samples, 1)
+            out[i]["flat"] = bool(samples >= 30 and float(np.std(np.clip(rel_sub[okm], 0, roof + 3.0))) < 0.5)
+            rr, cc = np.nonzero(okm)
+            px = minx + (c0 + cc + 0.5) * cell
+            py = maxy - (r0 + rr + 0.5) * cell
+            fit = roof_fit(px, py, rel_sub[okm], shapes[i]) if samples >= 12 else None
+            if fit is not None:
+                out[i]["fit"] = fit
+                out[i]["flat"] = False
+            elif samples >= 60 and shapes[i].area >= 400.0:
+                tiers = roof_tiers(rel_sub, okm, cell, roof, T @ Affine.translation(c0, r0), shapes[i])
+                if tiers:
+                    out[i]["tiers"] = tiers
+                    out[i]["flat"] = False
     return out
+
+
+def roof_fit(x: np.ndarray, y: np.ndarray, h: np.ndarray, poly: Any, *, min_px: int = 10, edge_m: float = 0.8
+             ) -> Optional[dict]:
+    """The pitched roof that best explains the laser's heights ``h`` (metres above ground) at points (``x``, ``y``) of the
+    footprint ``poly``: ``{"shape": "gabled"|"hipped", "across": bool, "eaves_m", "ridge_m", "rms_m"}``, or None when no
+    pitched roof explains them clearly better than a flat one (a flat roof, a cluttered one, a tiered one).
+
+    In the frame of the footprint's smallest rectangle (long side u, short side w), each shape is a straight line in one
+    distance: to the long walls for a gabled roof with its ridge along the building, to the short walls for one with the
+    ridge across, to the nearest wall for a hipped roof. Points within ``edge_m`` of the walls (the laser hits street and
+    eaves there) are left out. A shape counts when its slope is between 8° and 61°, the roof stands at least 1 m, its fit
+    is under 0.8 m and at most 60 % of the flat one's."""
+    import shapely
+    if len(h) < min_px:
+        return None
+    rect = poly.minimum_rotated_rectangle
+    if rect.geom_type != "Polygon":
+        return None
+    pts = np.asarray(rect.exterior.coords)[:4]
+    e1, e2 = pts[1] - pts[0], pts[2] - pts[1]
+    l1, l2 = float(np.hypot(*e1)), float(np.hypot(*e2))
+    along = e1 if l1 >= l2 else e2
+    L, W = max(l1, l2), min(l1, l2)
+    if W < 3.0:
+        return None
+    ang = math.atan2(along[1], along[0])
+    c = rect.centroid
+    u = (x - c.x) * math.cos(ang) + (y - c.y) * math.sin(ang)
+    w = -(x - c.x) * math.sin(ang) + (y - c.y) * math.cos(ang)
+    inside = np.asarray(shapely.contains_xy(poly.buffer(-edge_m), x, y)) if poly.area > 4 * edge_m * W else np.ones(len(h), bool)
+    if int(inside.sum()) < min_px:
+        return None
+    u, w, z = u[inside], w[inside], np.asarray(h, dtype=float)[inside]
+    flat_rms = float(np.std(z))
+    if flat_rms < 0.35:
+        return None
+    best = None
+    for shape, across, d, half in (("gabled", False, W / 2.0 - np.abs(w), W / 2.0),
+                                   ("gabled", True, L / 2.0 - np.abs(u), L / 2.0),
+                                   ("hipped", False, np.minimum(W / 2.0 - np.abs(w), L / 2.0 - np.abs(u)), W / 2.0)):
+        A = np.column_stack([np.ones_like(d), d])
+        coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+        eaves, slope = float(coef[0]), float(coef[1])
+        if not 0.14 <= slope <= 1.8:
+            continue
+        rms = float(np.sqrt(np.mean((A @ coef - z) ** 2)))
+        if best is None or rms < best["rms_m"]:
+            best = {"shape": shape, "across": across, "eaves_m": round(eaves, 2), "ridge_m": round(eaves + slope * half, 2),
+                    "rms_m": round(rms, 3)}
+    if best is None or best["rms_m"] > 0.8 or best["rms_m"] > 0.6 * flat_rms or best["ridge_m"] - best["eaves_m"] < 1.0:
+        return None
+    if best["eaves_m"] < 2.0:
+        return None
+    return best
+
+
+def roof_tiers(rel: np.ndarray, own: np.ndarray, cell: float, roof_m: float, transform: Any, poly: Any,
+               min_tier_m2: float = 80.0, simplify_m: float = 2.0, min_width_m: float = 8.0, max_levels: int = 3
+               ) -> Optional[list]:
+    """The levels of a roof that is not pitched (``roof_fit`` draws those): ``[(height_m, polygon in metres), ...]``
+    from the lowest (the whole footprint) up, or None when it is one flat level.
+
+    The laser sees everything on a roof (machinery, railings, skylights, a tree leaning over it): an opening 6 m wide
+    takes it out, a 7 m median and steps of 1.5 m (or 8 % of the roof) leave a few levels, each at its measured height;
+    each level above the lowest becomes the outline of where the roof stands at least that high, at least
+    ``min_width_m`` wide, simplified to ``simplify_m`` (straight walls, not the steps of the grid) and kept when it covers
+    ``min_tier_m2``; a level over 85 % of the footprint is the building's own height; the ``max_levels`` biggest stay (a
+    tower block on its podium, a stepped terrace, a hall over its shops)."""
+    import rasterio.features
+    import shapely
+    from scipy import ndimage
+    from shapely.geometry import shape as to_shape
+
+    if int(own.sum()) < 8 or roof_m < 2.5:
+        return None
+    inner = ndimage.binary_erosion(own)
+    core = inner if int(inner.sum()) >= int(own.sum()) // 3 else own   # edge cells mix roof and street
+    v = np.clip(np.nan_to_num(np.where(np.isfinite(rel), rel, np.nan), nan=roof_m), 2.0, roof_m + 3.0)
+    _d, (ri, ci) = ndimage.distance_transform_edt(~core, return_indices=True)
+    v = np.where(core, v, v[ri, ci])                                   # filters near the walls see roof, not street
+    size = max(3, int(round(6.0 / cell)))
+    smooth = ndimage.median_filter(ndimage.grey_opening(v, size=(size, size)), size=max(3, int(round(7.0 / cell)) | 1),
+                                   mode="nearest")
+    step = max(1.5, 0.08 * roof_m)
+    q = np.round(smooth / step) * step
+    levels = sorted(set(np.unique(q[core]).tolist()))
+    if len(levels) < 2:
+        return None
+    base_h = float(np.median(smooth[core & (q == levels[0])]))
+    found = []
+    half = max(1, int(round(min_width_m / 2.0 / cell)))
+    se = np.ones((2 * half + 1, 2 * half + 1), dtype=bool)               # square: corners stay square
+    for lv in levels[1:]:
+        mask = ndimage.binary_opening(core & (q >= lv), structure=se)    # a level is at least min_width_m wide
+        if not mask.any():
+            continue
+        h = float(np.median(smooth[core & (q == lv)])) if (core & (q == lv)).any() else lv
+        geoms = [to_shape(g) for g, val in rasterio.features.shapes(mask.astype(np.uint8), mask=mask, transform=transform)
+                 if val == 1]
+        if not geoms:
+            continue
+        g = shapely.union_all(geoms).buffer(0).simplify(simplify_m, preserve_topology=True).intersection(poly)
+        g = shapely.union_all([q2 for q2 in getattr(g, "geoms", [g]) if q2.geom_type == "Polygon" and q2.area >= min_tier_m2]) \
+            if not g.is_empty else g
+        if g.is_empty or g.area < min_tier_m2:
+            continue
+        if g.area >= 0.85 * poly.area:                                   # nearly all of it: that is the building's height
+            base_h, found = h, []
+            continue
+        found.append((h, g))
+    # the biggest few levels, each at least 1 m over the one under it
+    found = sorted(sorted(found, key=lambda t: -t[1].area)[:max_levels], key=lambda t: t[0])
+    out = [(round(base_h, 2), poly)]
+    for h, g in found:
+        if h - out[-1][0] >= 1.0:
+            out.append((round(h, 2), g))
+    return out if len(out) > 1 else None
+
+
+def trees(heights: np.ndarray, bounds: tuple[float, float, float, float], projector: Any, area_m: tuple[float, float, float, float],
+          *, is_ndsm: bool = False, buildings: Any = None, cell_m: float = 1.0, min_height_m: float = 3.0,
+          ground_window_m: float = 24.0, min_rough_m: float = 0.35, max_trees: int = 60000
+          ) -> list[tuple[float, float, float, float]]:
+    """The trees the laser saw: [(x, y, height_m, crown_m)] in metres of ``projector`` inside ``area_m`` (minx, miny, maxx,
+    maxy), one per crown, highest first.
+
+    Height above ground: the model itself for an nDSM; otherwise the model minus its ground, the lowest value within
+    ``ground_window_m`` smoothed over the same window (the street between the trees, the floor of a clearing). Buildings
+    (``buildings``, grown 2 m) are left out; a crown is a local top of the smoothed heights, at least ``min_height_m`` tall,
+    whose surface is rough (more than ``min_rough_m`` of spread within 2 m: leaves, not the flat top of a bridge, a wall or
+    a lorry)."""
+    import rasterio.features
+    from rasterio.transform import Affine
+    from scipy import ndimage
+
+    from . import canopy as canopy_mod
+
+    minx, miny, maxx, maxy = area_m
+    W, H = int(math.ceil((maxx - minx) / cell_m)), int(math.ceil((maxy - miny) / cell_m))
+    if W < 8 or H < 8 or W * H > 40_000_000 or heights.size == 0:
+        return []
+    G = _sample_grid(heights, bounds, projector, minx, maxy, cell_m, W, H)
+    fin = np.isfinite(G)
+    if not fin.any():
+        return []
+    G = np.where(fin, G, np.nanmin(G))
+    if is_ndsm:
+        rel = G
+    else:
+        win = max(3, int(round(ground_window_m / cell_m)) | 1)
+        ground = ndimage.uniform_filter(ndimage.minimum_filter(G, size=win, mode="nearest"), size=win, mode="nearest")
+        rel = G - ground
+    rel = np.where(fin, np.maximum(rel, 0.0), 0.0).astype(np.float32)
+    if buildings is not None and not buildings.is_empty:
+        T = Affine(cell_m, 0.0, minx, 0.0, -cell_m, maxy)
+        mask = rasterio.features.rasterize([(buildings.buffer(2.0), 1)], out_shape=(H, W), transform=T, fill=0, dtype="uint8")
+        rel[mask.astype(bool)] = 0.0
+    rel = ndimage.median_filter(rel, size=3)                        # lamp posts, wires, single noisy cells
+    f = ndimage.gaussian_filter(rel, sigma=max(0.6, 1.0 / cell_m))
+    window = max(3, int(round(3.0 / cell_m)) | 1)
+    peaks = (f == ndimage.maximum_filter(f, size=window)) & (f >= min_height_m)
+    if not peaks.any():
+        return []
+    r = max(1, int(round(2.0 / cell_m)))
+    spread = ndimage.maximum_filter(rel, size=2 * r + 1) - ndimage.minimum_filter(rel, size=2 * r + 1)
+    local_sd = np.sqrt(np.maximum(ndimage.uniform_filter(rel * rel, 2 * r + 1) - ndimage.uniform_filter(rel, 2 * r + 1) ** 2, 0))
+    peaks &= (local_sd >= min_rough_m) & (spread < 40.0)
+    ys, xs = np.nonzero(peaks)
+    if not len(xs):
+        return []
+    hts = ndimage.maximum_filter(rel, size=window)[ys, xs]        # the top of the crown, not of its smoothed copy
+    order = np.argsort(-hts)
+    taken = np.zeros_like(peaks)
+    keep = []
+    radius_px = canopy_mod.crown_m(hts) * 0.42 / cell_m
+    for i in order:
+        y, x = ys[i], xs[i]
+        if taken[y, x]:
+            continue
+        keep.append(i)
+        rr = max(1, int(radius_px[i]))
+        taken[max(0, y - rr):y + rr + 1, max(0, x - rr):x + rr + 1] = True
+        if len(keep) >= max_trees:
+            break
+    keep = np.asarray(keep)
+    X = minx + (xs[keep] + 0.5) * cell_m
+    Y = maxy - (ys[keep] + 0.5) * cell_m
+    ht = hts[keep]
+    return [(float(a), float(b), round(float(t), 2), float(c)) for a, b, t, c in zip(X, Y, ht, canopy_mod.crown_m(ht))]

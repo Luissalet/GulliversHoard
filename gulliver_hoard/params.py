@@ -91,8 +91,10 @@ class ModelParams(BaseModel):
                                                     "(else they run along the field's long side).")
     plazas: bool = Field(True, description="Squares and pedestrian areas in their own lighter colour (colour mode).")
     dsm_heights: bool = Field(True, description="Real heights of every building, with towers and spires as their own volumes, from "
-                                                "the laser surface model where one is open (Netherlands, France, England, NRW, "
-                                                "Switzerland, Flanders, Norway, Poland).")
+                                                "the laser surface model where one is open (Spain, Netherlands, France, England, "
+                                                "NRW, Switzerland, Flanders, Norway, Poland; Denmark with its token).")
+    laser_roofs: bool = Field(True, description="Where the laser surface model measured a building (dsm_heights), its roof as "
+                                                "the laser saw it: pitches, hips, domes, courtyards.")
     meadows: bool = Field(False, description="Colour all open land green (mountains and countryside), not only mapped parks and woods.")
     max_relief_ratio: float = Field(0.3, ge=0.05, le=2.0, description="The relief is kept at most this share of the model's longest "
                                                                          "side, lowering the vertical exaggeration if needed.")

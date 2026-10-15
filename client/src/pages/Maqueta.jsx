@@ -275,6 +275,7 @@ function Carries({ report }) {
   if (report.footprints_added > 0) lines.push(t("st_footprints_added", { n: num(report.footprints_added, 0, lang) }));
   if (list(report.landcover).length) lines.push(t("st_landcover", { v: list(report.landcover).map((v) => word("lc", v)).join(", ") }));
   if (report.dsm_buildings > 0) lines.push(t("st_dsm", { n: num(report.dsm_buildings, 0, lang) }));
+  if (report.laser_roofs > 0) lines.push(t("st_laser_roofs", { n: num(report.laser_roofs, 0, lang) }));
   if (report.fields > 0) lines.push(t("st_fields", { n: num(report.fields, 0, lang) }));
   if (report.field_rows) lines.push(t("st_field_rows"));
   if (report.rows_from_photo > 0) lines.push(t("st_rows_photo", { n: num(report.rows_from_photo, 0, lang) }));
