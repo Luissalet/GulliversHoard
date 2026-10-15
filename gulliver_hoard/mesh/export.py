@@ -55,9 +55,21 @@ def _xml_escape(text: str) -> str:
     return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
 
 
+def _vertex_format(verts: np.ndarray) -> str:
+    """Decimals that keep every vertex apart. The vertices are welded float32 positions: rounding them to 0.1 µm (the old
+    four decimals) merged neighbours a few tenths of a micron apart, and a slicer then read collapsed triangles and edges
+    shared by four faces. Six decimals keep them apart almost always; nine significant digits always (float32 round trip)."""
+    if len(verts) == 0:
+        return ".6f"
+    rounded = np.round(verts.astype(np.float64), 6)
+    distinct = len(np.unique(rounded.view(np.dtype((np.void, 24))).ravel()))
+    return ".6f" if distinct == len(verts) else ".9g"
+
+
 def _mesh_xml(solid: Any) -> str:
     verts, tris = S.mesh_arrays(solid)
-    vs = "".join(f'<vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>' for x, y, z in verts.tolist())
+    fmt = _vertex_format(verts)
+    vs = "".join(f'<vertex x="{x:{fmt}}" y="{y:{fmt}}" z="{z:{fmt}}"/>' for x, y, z in verts.tolist())
     ts = "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}"/>' for a, b, c in tris.tolist())
     return f"<mesh><vertices>{vs}</vertices><triangles>{ts}</triangles></mesh>"
 
@@ -137,7 +149,7 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     aspect = np.arctan2(-dzdx, dzdy)
     az, alt = np.radians(315), np.radians(45)
     shade = np.sin(alt) * np.sin(slope) + np.cos(alt) * np.cos(slope) * np.cos(az - aspect)
-    shade = np.clip(0.55 + 0.6 * (shade - 0.7), 0.35, 1.15)
+    shade = np.clip(1.0 + 1.1 * (shade - np.sin(alt)), 0.45, 1.25)      # flat ground keeps its colour
     rgb = np.empty(Z.shape + (3,), dtype=np.float32)
     rgb[:] = _hex(PART_COLORS["terrain"])
     for layer, color in (("water", PART_COLORS["water"]), ("roads", "#F7F4EE")):
@@ -147,11 +159,19 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     c = result.masks.get("contours")
     if c is not None and c.shape == Z.shape:
         rgb[c] *= 0.82
-    rgb *= shade[..., None]
     img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8)[::-1])        # rows north first
     gx0 = int(round((0 - minx) * scale))
     gy0 = int(round((maxy - H) * scale))
-    img = img.resize((max(1, int(round(W * scale))), max(1, int(round(H * scale)))), Image.LANCZOS)
+    gw, gh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
+    img = img.resize((gw, gh), Image.LANCZOS)
+    # the relief shades every flat colour (rock, snow, green) drawn below, not just the bare ground: on a mountain those
+    # layers cover most of the model and would otherwise hide its shape
+    shade_img = Image.fromarray(np.ascontiguousarray(shade[::-1], dtype=np.float32)).resize((gw, gh), Image.BILINEAR)
+    shade_px = np.ones((h, w), dtype=np.float32)
+    sx0, sy0 = max(0, gx0), max(0, gy0)
+    sx1, sy1 = min(w, gx0 + gw), min(h, gy0 + gh)
+    if sx1 > sx0 and sy1 > sy0:
+        shade_px[sy0:sy1, sx0:sx1] = np.asarray(shade_img)[sy0 - gy0:sy1 - gy0, sx0 - gx0:sx1 - gx0]
 
     def px(coords):
         return [((x - minx) * scale, (maxy - y) * scale) for x, y in coords]
@@ -183,6 +203,10 @@ def thumbnail_png(result: BuildResult, size: int = 640) -> bytes:
     paths = result.footprints.get("paths")
     for poly in S.polygons(paths) if paths is not None else []:
         draw.polygon(px(poly.exterior.coords), fill=_hex(PART_COLORS["terrain"]) + (230,))
+    arr = np.asarray(layer).astype(np.float32)
+    arr[..., :3] *= shade_px[..., None]
+    layer = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGBA")
+    draw = ImageDraw.Draw(layer, "RGBA")
     trees = result.footprints.get("trees")
     if trees is not None:
         tc = _hex(PART_COLORS["trees"])
