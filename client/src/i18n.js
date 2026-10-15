@@ -1,6 +1,8 @@
 // Bilingual UI: Spanish (castellano de España) by default, English on request. The choice is kept in localStorage.
 // Each entry is [español, English]; `{name}` placeholders are filled by t(key, { name }). A key with an `_one` twin uses it when n is 1.
 
+import PRINTING_STRINGS from "./printing-strings.js";
+
 const D = {
   // shell
   nav_library: ["Maquetas", "Models"],
@@ -479,6 +481,8 @@ export function initialLang() {
   }
   return "es";
 }
+
+Object.assign(D, PRINTING_STRINGS);
 
 export function saveLang(lang) {
   try {

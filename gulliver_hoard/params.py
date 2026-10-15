@@ -10,6 +10,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .geo import Area
+from .printing import PrintProfile
 
 Shape = Literal["rect", "circle", "hexagon", "rounded"]
 RoadStyle = Literal["engraved", "raised", "flat", "none"]
@@ -142,6 +143,7 @@ class ModelParams(BaseModel):
     # output
     color: ColorMode = "color"
     dem: DemSource = "auto"
+    print_profile: Optional[PrintProfile] = Field(None, description="Printer, material and price snapshot for this model; registry edits do not alter it.")
 
     @model_validator(mode="after")
     def _square_shapes(self) -> "ModelParams":
@@ -238,7 +240,7 @@ PRESETS = {
 }
 
 MAX_CELLS = 3_000_000
-NULLABLE = {"highlight_lon", "highlight_lat"}      # an explicit null clears these on an update
+NULLABLE = {"highlight_lon", "highlight_lat", "print_profile"}      # an explicit null clears these on an update
 
 
 def suggest_tiles(width_mm: float, height_mm: float, bed_x: float, bed_y: float, margin: float = 6.0) -> tuple[int, int]:

@@ -16,6 +16,7 @@ from .hoard_link.atomic import write_bytes_atomic, write_json_atomic
 from .mesh import export as E
 from .mesh import solids as S
 from .mesh.build import PART_COLORS, PART_LABELS, BuildResult
+from . import printing
 
 
 def _slug(text: str) -> str:
@@ -38,6 +39,7 @@ def _check(solid: Any) -> dict[str, Any]:
 def write_outputs(result: BuildResult, folder: Path, *, name: str, bed: tuple[float, float] = (256.0, 256.0),
                   progress: Optional[Callable[[float, str], None]] = None, lang: int = 0) -> dict[str, Any]:
     p = result.params
+    bed = printing.bed(p, bed)
     tmp = Path(folder)
     tmp.mkdir(parents=True, exist_ok=True)
     slug = _slug(name)
@@ -112,6 +114,9 @@ def write_outputs(result: BuildResult, folder: Path, *, name: str, bed: tuple[fl
         "attribution": result.attribution,
         "bytes": {k: (tmp / v).stat().st_size for k, v in files.items()},
     }
+    report.setdefault("surface_mm2", round(whole.surface_area(), 3))
+    report.setdefault("volume_cm3", round(whole.volume() / 1000, 3))
+    report["material_estimate"] = printing.estimate(report, p.print_profile)
     write_json_atomic(tmp / "report.json", report)
     return report
 

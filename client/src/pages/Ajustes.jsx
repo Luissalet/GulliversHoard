@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../api.js";
+import { ProfilesEditor } from "../components/PrintProfiles.jsx";
 import { useApp } from "../context.js";
 import { Busy, ErrorBox, Field, Icon, ICONS, Switch, useBusy, useLoad } from "../components/ui.jsx";
 import { useContextProvider } from "../components/hooks.js";
@@ -109,6 +110,7 @@ export default function Ajustes() {
         <Busy busy={busy.save} className="btn btn-primary" onClick={save} disabled={!dirty}>{t("save")}</Busy>
         {dirty && <button type="button" className="btn" onClick={() => setForm({ ...data, overpass_servers: data.overpass_servers.join("\n") })}>{t("discard")}</button>}
       </div>
+      <ProfilesEditor defaults={form}/>
     </div>
   );
 }

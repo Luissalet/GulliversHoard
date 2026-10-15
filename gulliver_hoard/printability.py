@@ -152,6 +152,40 @@ def _thin_trees(trees: Any, min_diameter_mm: float) -> tuple[int, int]:
     return int(len(radii)), int((radii * 2.0 < min_diameter_mm).sum())
 
 
+def locations(result: Any, min_width_mm: float) -> list[dict[str, Any]]:
+    """Positions of thin footprints and crowns, in the same millimetres/Z-up frame as the preview; no printed geometry."""
+    fp = getattr(result, "footprints", None) or {}
+    out = []
+    def add(layer, x, y, bounds, width=None):
+        z = 0.
+        if getattr(result, "Z", None) is not None:
+            from .mesh.build import _sample
+            z = float(_sample(result.Z, result.xs, result.ys, np.array([x]), np.array([y]))[0])
+        out.append({"id": f"{layer}-{len(out)}", "layer": layer, "position_mm": [round(x, 3), round(y, 3), round(z + .2, 3)],
+                    "bounds_mm": [round(v, 3) for v in bounds], "width_mm": width, "limit_mm": min_width_mm})
+    for shape in fp.get("buildings") or []:
+        for poly in S.polygons(shape):
+            rect = poly.minimum_rotated_rectangle
+            if rect.geom_type != "Polygon":
+                continue
+            c = np.asarray(rect.exterior.coords)
+            width = min(float(np.linalg.norm(c[1] - c[0])), float(np.linalg.norm(c[2] - c[1])))
+            if width < min_width_mm:
+                q = poly.representative_point()
+                add("buildings", q.x, q.y, poly.bounds, round(width, 3))
+    for layer, _ in _LAYERS:
+        for poly in S.polygons(thin_regions(fp.get(layer), min_width_mm)):
+            q = poly.representative_point()
+            add(layer, q.x, q.y, poly.bounds)
+    if fp.get("trees") is not None:
+        points, radii = fp["trees"]
+        for xy, radius in zip(points, radii):
+            if radius * 2 < min_width_mm:
+                x, y = float(xy[0]), float(xy[1])
+                add("trees", x, y, (x-radius, y-radius, x+radius, y+radius), round(radius * 2, 3))
+    return out
+
+
 # -- the report ------------------------------------------------------------------------------------------------------------------
 NAMES = {"terrain": "Terreno", "buildings": "Edificios", "water": "Agua", "roads": "Carreteras", "rails": "Vías del tren",
          "green": "Zonas verdes", "trees": "Árboles", "rock": "Roca", "snow": "Nieve", "frame": "Marco", "fields": "Campos",
@@ -281,5 +315,5 @@ def analyse(result: Any, nozzle_mm: float = 0.4, layer_mm: float = 0.2) -> dict[
         advice.append("Nada que corregir: con esta boquilla el modelo debería imprimirse sin problemas.")
     return {"nozzle_mm": nozzle, "layer_mm": float(layer_mm), "score": score, "verdict": verdict, "parts": parts,
             "buildings": buildings, "layers": layers, "trees": trees,
-            "tiny_bodies": tiny_total, "advice": advice,
+            "tiny_bodies": tiny_total, "advice": advice, "locations": locations(result, two),
             "fixes": [{"param": k, "from": getattr(params, k), "to": v} for k, v in sorted(wanted.items())]}

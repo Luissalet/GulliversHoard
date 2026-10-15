@@ -1817,6 +1817,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         "grid": [nx, ny],
         "triangles": int(sum(m.num_tri() for m in parts.values())),
         "volume_cm3": round(volume / 1000.0, 1),
+        "surface_mm2": round(area_mm2, 3),
         "weight_g_pla": round(grams, 0),
         "parts": {n: {"volume_cm3": round(m.volume() / 1000.0, 2), "triangles": m.num_tri(), "genus": m.genus()} for n, m in parts.items()},
         "buildings": len(building_solids),
@@ -1872,6 +1873,10 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                   "plazas": zone_shapes.get("plazas"), "fields": zone_shapes.get("fields"), "track": track_shape}
     result = BuildResult(p, parts, tiles, Z, xs, ys, masks, footprints, stats, notes, [a for a in attribution if a], whole,
                          colors=palette_colors(p.palette))
+    if p.print_profile:
+        if p.print_profile.filament.color:
+            result.colors.update({name: p.print_profile.filament.color for name in parts})
+        result.colors.update({name: filament.color for name, filament in p.print_profile.filaments.items() if filament.color})
     try:
         stats["printability"] = printability.analyse(result, nozzle_mm=p.nozzle_mm)
     except Exception as exc:  # noqa: BLE001 - a report never breaks a model

@@ -3,6 +3,8 @@ import { api, fileUrl } from "../api.js";
 import { useApp } from "../context.js";
 import { Bar, Busy, ErrorBox, Icon, ICONS, Modal, Rel, useBusy, useLoad, useStored } from "../components/ui.jsx";
 import Viewer3D from "../components/Viewer3D.jsx";
+import { ModelPrinting } from "../components/PrintProfiles.jsx";
+import { partName } from "../printing-strings.js";
 import ProductShot, { shotText } from "../components/ProductShot.jsx";
 import { StatusChip, stepLabel } from "./Biblioteca.jsx";
 import { bytes, num } from "../format.js";
@@ -16,6 +18,8 @@ export default function Maqueta({ param }) {
   const [hidden, setHidden] = useState(() => new Set());
   const [explode, setExplode] = useState(0);
   const [view, setView] = useState("iso");
+  const [issueLayer, setIssueLayer] = useState(null);
+  useEffect(()=>setIssueLayer(null),[param]);
   const viewerRef = useRef(null);
   const [busy, run] = useBusy();
   const [exportOpen, setExportOpen] = useState(false);
@@ -53,6 +57,7 @@ export default function Maqueta({ param }) {
   }, [active, m, param, shownBuild, reload]);
 
   const report = m?.report;
+  const issues = useMemo(()=>(report?.printability?.locations || []).filter(p=>issueLayer === "all" || p.layer === issueLayer),[report,issueLayer]);
   const build = m?.build?.id;
   const glb = report && build ? fileUrl(m.id, "preview.glb", { build }) : null;
   const panels = (report?.tiles || []).some((x) => x.panel);
@@ -80,6 +85,7 @@ export default function Maqueta({ param }) {
       <div className="model-view">
         {glb ? (
           <Viewer3D ref={viewerRef} url={glb} hidden={hidden} explode={explode} view={view}
+            issues={issues}
             labels={{ viewer: t("viewer_label", { name: m.name }), loading: t("loading_3d"), error: t("viewer_error"), capturing: shotText(lang, "capturing") }} />
         ) : (
           <div className="viewer viewer-empty">
@@ -92,6 +98,8 @@ export default function Maqueta({ param }) {
               {["iso", "top", "front"].map((v) => <button key={v} type="button" aria-pressed={view === v} onClick={() => setView(v)}>{t(`view_${v}`)}</button>)}
             </div>
             <ProductShot viewerRef={viewerRef} modelId={m.id} modelName={m.name} />
+            {!!report?.printability?.locations?.length && <button type="button" className="btn btn-sm" aria-pressed={!!issueLayer}
+              onClick={()=>setIssueLayer(issueLayer?null:"all")}>{t(issueLayer?"thin_hide":"thin_show",{n:report.printability.locations.length})}</button>}
             <div className="part-toggles" role="group" aria-label={t("parts")}>
               {parts.map((p) => (
                 <button key={p} type="button" className="part-toggle" aria-pressed={!hidden.has(p)} onClick={() => toggle(p)}>
@@ -155,7 +163,8 @@ export default function Maqueta({ param }) {
             {!report.fits_bed && !(report.tiles || []).length && <div className="banner banner-warn">{t("too_big_for_bed", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
             {(report.tiles || []).some((x) => !x.fits_bed) && <div className="banner banner-warn">{t("tiles_too_big", { x: report.bed_mm[0], y: report.bed_mm[1] })}</div>}
 
-            <Printability data={report.printability || report.stats?.printability} onFix={active ? null : () => setAdviceOpen(true)} />
+            <Printability data={report.printability || report.stats?.printability} onFix={active ? null : () => setAdviceOpen(true)} activeLayer={issueLayer} onLocate={layer=>{setIssueLayer(layer === issueLayer ? null : layer);setView("top");}} />
+            <ModelPrinting key={m.id} model={m}/>
             <Builds model={m} onChanged={reload} onExport={setExportBuild} />
             <Carries report={report} />
 
@@ -227,7 +236,7 @@ export default function Maqueta({ param }) {
 const VERDICT_CHIP = { ok: "chip-ok", review: "chip-amber", risky: "chip-danger" };
 const pct1 = (v, lang) => `${num(v, 1, lang)} %`;
 
-function Printability({ data, onFix }) {
+function Printability({ data, onFix, onLocate, activeLayer }) {
   const { t, lang } = useApp();
   if (!data || typeof data.score !== "number") return null;
   const verdict = VERDICT_CHIP[data.verdict] ? data.verdict : "review";
@@ -246,6 +255,9 @@ function Printability({ data, onFix }) {
         <span className={`chip ${VERDICT_CHIP[verdict]}`}>{t(`printability_${verdict}`)}</span>
       </div>
       <Bar value={data.score / 100} alarm={false} />
+      {!!data.locations?.length && <div className="space-y-2"><p className="help">{t("thin_help")}</p><div className="flex flex-wrap gap-2">
+        {[...new Set(data.locations.map(p=>p.layer))].map(layer=><button key={layer} type="button" aria-pressed={activeLayer === layer} className={`btn btn-sm ${activeLayer === layer ? "btn-primary" : ""}`} onClick={()=>onLocate?.(layer)}>{partName(layer,lang)} ({data.locations.filter(p=>p.layer===layer).length})</button>)}
+      </div></div>}
       {(data.advice || []).length > 0 && (
         <ul className="help space-y-1">
           {data.advice.map((a, i) => <li key={i}>• {a}</li>)}
@@ -300,7 +312,7 @@ function LogBox({ lines }) {
 }
 
 const fxLabel = (t, param) => (t.has(`fx_${param}`) ? t(`fx_${param}`) : param);
-const fmtVal = (v, lang) => (typeof v === "number" ? num(v, Math.abs(v) < 10 && v % 1 ? 2 : 0, lang) : v === true ? "✓" : v === false ? "✗" : v == null || v === "" ? "—" : String(v));
+const fmtVal = (v, lang) => (typeof v === "number" ? num(v, Math.abs(v) < 10 && v % 1 ? 2 : 0, lang) : v === true ? "✓" : v === false ? "✗" : v == null || v === "" ? "—" : typeof v === "object" && v.name ? v.name : String(v));
 
 // The printability fixes of the current build as parameter changes: pick, preview what changes (size, mesh, bed), apply.
 function AdviceDialog({ model, onClose, onDone }) {

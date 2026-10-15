@@ -11,7 +11,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
  * A ref gives an imperative handle for listing media: `snapshot({width, height, background})` resolves a PNG Blob and
  * `turntable({seconds, fps, width, height, onProgress})` a WebM Blob, both rendered with a studio look (see `studio`).
  */
-const Viewer3D = forwardRef(function Viewer3D({ url, hidden, explode = 0, view = "iso", onInfo, labels }, ref) {
+const Viewer3D = forwardRef(function Viewer3D({ url, hidden, explode = 0, view = "iso", issues = [], onInfo, labels }, ref) {
   const holder = useRef(null);
   const s = useRef({});
   const [state, setState] = useState("loading");
@@ -148,6 +148,36 @@ const Viewer3D = forwardRef(function Viewer3D({ url, hidden, explode = 0, view =
   }, [url]);
 
   useEffect(() => { applyHidden(hidden); }, [hidden]);
+  useEffect(() => {
+    if (state !== "ready" || !issues.length) return undefined;
+    const {root,groups,size} = s.current;
+    const byGroup = new Map();
+    for (const issue of issues) {
+      const [x,y] = issue.position_mm;
+      const group = groups.find(({g})=>g.children.some(mesh=>{
+        if (!mesh.isMesh || mesh.userData.fragility) return false;
+        mesh.geometry.computeBoundingBox();
+        const b=mesh.geometry.boundingBox;
+        return x>=b.min.x && x<=b.max.x && y>=b.min.y && y<=b.max.y;
+      }))?.g || root;
+      if (!byGroup.has(group)) byGroup.set(group,[]);
+      byGroup.get(group).push(issue);
+    }
+    const radius = Math.max(.8,size*.006);
+    const geometry = new THREE.RingGeometry(radius*.6,radius,16);
+    const material = new THREE.MeshBasicMaterial({color:0xe6ad45,side:THREE.DoubleSide,depthTest:false,depthWrite:false,transparent:true,opacity:.95});
+    const meshes=[];
+    for (const [group,list] of byGroup) {
+      const mesh=new THREE.InstancedMesh(geometry,material,list.length);
+      mesh.userData.fragility=true;
+      mesh.renderOrder=100;
+      mesh.frustumCulled=false;
+      list.forEach((issue,i)=>mesh.setMatrixAt(i,new THREE.Matrix4().makeTranslation(...issue.position_mm)));
+      mesh.instanceMatrix.needsUpdate=true;
+      group.add(mesh);meshes.push(mesh);
+    }
+    return ()=>{meshes.forEach(mesh=>mesh.parent?.remove(mesh));geometry.dispose();material.dispose();};
+  },[state,issues]);
   useEffect(() => { applyExplode(explode); }, [explode]);
   useEffect(() => { if (state === "ready") setCamera(view); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [view]);
 

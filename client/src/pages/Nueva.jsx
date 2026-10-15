@@ -4,6 +4,7 @@ import { useApp } from "../context.js";
 import { Busy, Icon, ICONS, Switch, useBusy, useStored } from "../components/ui.jsx";
 import { useContextProvider } from "../components/hooks.js";
 import MapPicker from "../components/MapPicker.jsx";
+import { ProfilePicker } from "../components/PrintProfiles.jsx";
 import { sizeOfBox } from "../geo.js";
 import { num } from "../format.js";
 import { MAX_TRACK_BYTES, frameBox, summariseTrack } from "../track.js";
@@ -237,6 +238,7 @@ export default function Nueva({ query }) {
             <input className="field" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("name_placeholder")} maxLength={120} />
           </label>
           {place && <div className="help trunc" title={place}>{place}</div>}
+          <ProfilePicker value={form.print_profile} onChange={profile=>set({print_profile:profile,...(profile?{nozzle_mm:profile.nozzle_mm}:{})})}/>
           <div>
             <span className="label">{t("preset")}</span>
             <div className="seg w-full" role="group">

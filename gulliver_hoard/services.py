@@ -27,6 +27,7 @@ from .sources import Sources
 from .sources import dem as dem_mod
 from .sources import osm as osm_mod
 from .sources.http import Fetcher
+from . import printing
 
 log = logging.getLogger("gulliver")
 
@@ -46,6 +47,7 @@ class Services:
         config.data_dir.mkdir(parents=True, exist_ok=True)
         self.token = read_or_create_token(config.token_path)
         self.settings = Settings(config.settings_path)
+        self.print_profiles = printing.Profiles(config.data_dir / "print-profiles.json")
         self.fetcher = Fetcher(config.cache_dir)
         if sources is not None:
             self.sources = sources
@@ -101,11 +103,19 @@ class Services:
         merged.update({k: v for k, v in (values or {}).items() if v is not None or k in NULLABLE})
         if "dem" not in (values or {}) and not base:
             merged["dem"] = self.settings["dem"]
+        if "nozzle_mm" not in (values or {}):
+            profile = (values or {}).get("print_profile")
+            if profile:
+                merged["nozzle_mm"] = printing.PrintProfile(**profile).nozzle_mm
+            elif not base:
+                merged["nozzle_mm"] = self.settings["nozzle_mm"]
         return ModelParams(**merged)
 
     def area_check(self, params: ModelParams, *, fetch: bool = False) -> dict[str, Any]:
         """What a build would make, without building: scale, size, mesh, tiles for the bed, sources, warnings."""
         s = self.settings.get()
+        bx, by = printing.bed(params, (s["bed_x_mm"], s["bed_y_mm"]))
+        s.update(bed_x_mm=bx, bed_y_mm=by)
         w, h = params.model_size_mm
         fr = params.effective_frame_mm()
         panels = params.panels_x * params.panels_y > 1
@@ -136,7 +146,7 @@ class Services:
         if params.buildings and params.scale_denominator > 25000:
             warnings.append({"code": "tiny_buildings", "es": "A esta escala los edificios salen diminutos; mejor el preajuste Paisaje.",
                              "en": "At this scale buildings come out tiny; the Landscape preset suits better."})
-        if params.resolution_mm < s["nozzle_mm"] * 0.5:
+        if params.resolution_mm < params.nozzle_mm * 0.5:
             warnings.append({"code": "fine_resolution", "es": "Celdas mucho más finas que la boquilla: más tiempo y archivos grandes sin ganar detalle.",
                              "en": "Cells much finer than the nozzle: more time and bigger files for no detail."})
         if not fits and panels:
@@ -309,6 +319,34 @@ class Services:
                 "folder": str(folder), "files": files}
 
     # -- builds: history, comparison, printability fixes ---------------------------------------------------------------------
+    def profile_apply(self, pid: str, profile_id: str, *, duplicate: bool = True, build: bool = True) -> dict[str, Any]:
+        profile = self.print_profiles.get(profile_id)
+        rec = self.projects.get(pid)
+        if duplicate:
+            rec = self.projects.duplicate(pid, f"{rec['name']} · {profile.name}")
+            pid = rec["id"]
+        else:
+            self.projects.update(pid, keep_previous=True)
+        return self.update(pid, values={"print_profile": profile.model_dump(), "nozzle_mm": profile.nozzle_mm}, build_now=build)
+
+    def materials(self, pid: str, *, build_id: str = "", profile_id: str = "") -> dict[str, Any]:
+        report = self.projects.report(pid, build_id)
+        if not report:
+            raise GulliverError("not_found", "This model has not been built yet.")
+        profile = self.print_profiles.get(profile_id) if profile_id else None
+        if not profile_id and report.get("material_estimate"):
+            return report["material_estimate"]
+        return printing.estimate(report, profile)
+
+    def issues(self, pid: str, *, build_id: str = "", layer: str = "") -> dict[str, Any]:
+        report = self.projects.report(pid, build_id)
+        if not report:
+            raise GulliverError("not_found", "This model has not been built yet.")
+        data = (report.get("printability") or {}).get("locations")
+        if data is None:
+            raise GulliverError("unavailable", "Rebuild this older model to locate its thin features.")
+        return {"model_id": pid, "build_id": build_id, "locations": [p for p in data if not layer or p["layer"] == layer]}
+
     def builds(self, pid: str) -> dict[str, Any]:
         rec = self.projects.get(pid)
         out = []
