@@ -416,8 +416,11 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         rail_shape = _unpinch(rg) if not rg.is_empty else None
     green_mm = to_mm(feats.green).intersection(model_box) if feats.green is not None else None
     path_shape = None
-    if path_lines and green_mm is not None and not green_mm.is_empty:
-        pg = _line_buffer(path_lines).intersection(green_mm.buffer(0.3))
+    # in a town the paths are the ones inside parks and woods; on open land (meadows) every trail is drawn, over the rock
+    # and the snow too
+    walk_area = model_box if p.meadows else green_mm
+    if path_lines and walk_area is not None and not walk_area.is_empty:
+        pg = _line_buffer(path_lines).intersection(walk_area if p.meadows else walk_area.buffer(0.3))
         if road_shape is not None:
             pg = pg.difference(road_shape.buffer(0.1))
         path_shape = _unpinch(pg) if not pg.is_empty else None
@@ -756,8 +759,6 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 areas.append(("rock", shapely.union_all(np.array(rock, dtype=object))))
         if p.green and (green_mm is not None or p.meadows):
             g = model_box if p.meadows else green_mm      # meadows: every open bit of land is green
-            if path_shape is not None:
-                g = g.difference(path_shape)          # the paths show the ground through the green
             areas.append(("green", g))
         taken = None
         cutters = []
@@ -774,6 +775,8 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 g = g.difference(wet)
             if houses is not None:
                 g = g.difference(houses)
+            if path_shape is not None and name in ("snow", "rock", "green"):
+                g = g.difference(path_shape)          # the paths show the ground through the green, the rock and the snow
             if taken is not None:
                 g = g.difference(taken.buffer(0.08))
             if name in ("snow", "rock"):              # no speckles: drop crumbs, smooth the edge

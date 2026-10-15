@@ -59,7 +59,7 @@ class ModelParams(BaseModel):
     bridges: bool = True
     arches: bool = Field(True, description="Bridges over water stand on arches and piers (off: a solid block down to the water).")
     green: bool = True
-    paths: bool = Field(True, description="Footpaths inside parks and woods, cut out of the green layer.")
+    paths: bool = Field(True, description="Footpaths inside parks and woods, cut out of the green layer; with meadows on, every trail across the land, over rock and snow too.")
     min_path_mm: float = Field(0.4, ge=0.2, le=3, description="Narrowest path on the model.")
     trees: bool = Field(True, description="3D trees: mapped trees and rows, woods filled densely, parks scattered.")
     tree_density: float = Field(1.0, ge=0.0, le=3.0, description="How thickly woods and parks are filled with trees.")
@@ -163,7 +163,7 @@ PRESETS = {
              "contours_m": 0.0, "green": True, "water": True, "rails": True, "resolution_mm": 0.3, "trees": True, "roofs": "auto"},
     "landscape": {"size_mm": 200.0, "building_exag": 1.0, "buildings": False, "roads": "engraved", "road_detail": "main",
                   "contours_m": -1.0, "green": True, "water": True, "rails": False, "resolution_mm": 0.4, "trees": True,
-                  "zones": True, "paths": False, "meadows": True, "z_exag": 1.5},
+                  "zones": True, "paths": True, "meadows": True, "z_exag": 1.5},
     "relief": {"size_mm": 200.0, "z_exag": 2.5, "buildings": False, "roads": "none", "contours_m": 0.0, "green": False,
                "water": True, "waterways": True, "rails": False, "color": "mono", "resolution_mm": 0.35, "trees": False,
                "zones": False},

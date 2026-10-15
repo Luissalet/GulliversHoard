@@ -276,3 +276,32 @@ def test_river_top_has_no_walls_inside_the_water():
     if len(walls):
         inside &= ~shapely.contains_xy(bridges.buffer(0.6), walls[:, 0], walls[:, 1])
     assert inside.sum() == 0
+
+
+def test_trails_cross_the_rock_on_open_land():
+    class Ridge(FakeSources):
+        def dem(self, bbox, want_res_m, **_):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            u = np.linspace(-1, 1, 200)
+            U, V = np.meshgrid(u, u)
+            data = (800.0 + 1600.0 * np.exp(-(U ** 2) / 0.05)).astype(np.float32)        # a steep ridge north-south
+            step = ((lon_max - lon_min) / 199, (lat_max - lat_min) / 199)
+            return Composite(DemGrid(data, "lonlat", (lon_min, lat_max), step, source="ridge", res_m=25), None)
+
+        def osm(self, bbox, **_):
+            lon_min, lat_min, lon_max, lat_max = bbox
+            lat = (lat_min + lat_max) / 2
+            pts = [{"lat": lat, "lon": lon_min + (lon_max - lon_min) * t} for t in (0.05, 0.5, 0.95)]
+            return {"elements": [{"type": "way", "id": 1, "tags": {"highway": "path", "sac_scale": "mountain_hiking"},
+                                  "geometry": pts}]}
+
+    from gulliver_hoard.params import PRESETS
+    p = ModelParams(**{**PRESETS["landscape"], "lon": 7.0, "lat": 46.0, "width_m": 6000, "height_m": 6000, "size_mm": 100,
+                       "resolution_mm": 0.8, "color": "color", "z_exag": 2.0, "rock_slope_deg": 20, "contours_m": 0})
+    r = build(p, Ridge(), name="Cresta")
+    assert p.paths and r.stats["paths_drawn"] == 1 and "rock" in r.stats["colour_layers"]
+    trail, rock = r.footprints["paths"], r.footprints["rock"]
+    assert trail is not None and trail.length > 0
+    # the trail crosses the ridge, where the slope is rock, and the rock layer leaves it showing the ground
+    assert trail.intersects(rock.buffer(2.0)) and trail.intersection(rock).area < 1e-6
+    assert closed(r.parts["rock"]) and closed(r.single)
