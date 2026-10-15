@@ -436,3 +436,37 @@ def test_tiered_building_is_one_solid():
     solid = _tiered(shape, tiers, 1.0, 2.0, 0.2, lambda g: g.buffer(0) if g is not None else None, 0.5)
     bb = solid.bounding_box()
     assert abs(bb[5] - (2.0 + 21.0 * 0.2)) < 1e-6 and solid.volume() > 0
+
+
+def test_laser_tells_conifers_by_their_pointed_crowns():
+    proj = Projector(LON, LAT)
+    n = 120
+    xs = np.arange(n) + 0.5 - n / 2.0
+    X, Y = np.meshgrid(xs, xs[::-1])
+    h = np.full(X.shape, 2.0)
+    d1 = np.hypot(X + 25, Y)                                                  # a fir: a cone 16 m tall, 6 m wide
+    h = np.maximum(h, 2.0 + np.clip(16.0 * (1 - d1 / 3.0), 0, None))
+    d2 = np.hypot(X - 25, Y)                                                  # an oak: a dome 14 m tall, 10 m wide
+    h = np.maximum(h, 2.0 + np.where(d2 < 5.0, 14.0 * np.sqrt(np.clip(1 - (d2 / 5.0) ** 2, 0, 1)), 0.0))
+    h += np.random.default_rng(5).uniform(0, 0.5, h.shape) * (np.minimum(d1, d2) < 5)
+    lo, hi = proj.inv(-n / 2.0, -n / 2.0), proj.inv(n / 2.0, n / 2.0)
+    found = dsm.trees(h.astype(np.float32), (lo[0], lo[1], hi[0], hi[1]), proj, (-55, -55, 55, 55))
+    fir = min(found, key=lambda t: (t[0] + 25) ** 2 + t[1] ** 2)
+    oak = min(found, key=lambda t: (t[0] - 25) ** 2 + t[1] ** 2)
+    assert fir[4] == 1 and oak[4] == 0
+
+
+def test_laser_measures_crown_widths():
+    proj = Projector(LON, LAT)
+    n = 120
+    xs = np.arange(n) + 0.5 - n / 2.0
+    X, Y = np.meshgrid(xs, xs[::-1])
+    h = np.full(X.shape, 1.0)
+    for cx, r in ((-25, 3.0), (25, 8.0)):                                     # a slim tree and a broad one, both 12 m
+        d = np.hypot(X - cx, Y)
+        h = np.maximum(h, 1.0 + np.where(d < r, 12.0 * np.sqrt(np.clip(1 - (d / r) ** 2, 0, 1)), 0.0))
+    lo, hi = proj.inv(-n / 2.0, -n / 2.0), proj.inv(n / 2.0, n / 2.0)
+    found = dsm.trees(h.astype(np.float32), (lo[0], lo[1], hi[0], hi[1]), proj, (-55, -55, 55, 55), min_rough_m=0.0)
+    slim = min(found, key=lambda t: (t[0] + 25) ** 2 + t[1] ** 2)
+    broad = min(found, key=lambda t: (t[0] - 25) ** 2 + t[1] ** 2)
+    assert slim[3] < 8.0 and broad[3] > 11.0

@@ -172,3 +172,14 @@ def test_plaque_and_label_carry_the_model_name_in_colour(monkeypatch):
     monkeypatch.setattr(build_mod.plaque_mod, "plaque_layout", lambda *a, **kw: seen.append(kw["title"]) or real(*a, **kw))
     res = build(make(plaque=True, color="color"), FakeSources(), name="Lilliput")
     assert res.stats["plaque"] and seen and set(seen) == {"Lilliput"}
+
+
+def test_hedges_become_rows_of_bushes():
+    from shapely.geometry import LineString
+    from gulliver_hoard.mesh.build import _to_mm
+    res = build(make(tree_size_mm=0.7), FakeSources())         # fine enough for single trees
+    p = res.params
+    hedge = _to_mm(LineString([(850, -650), (1000, -640)]), p.scale_mm_per_m, p.area.width_m, p.area.height_m)
+    P, _R = res.footprints["trees"]
+    near = [pt for pt in np.asarray(P) if hedge.distance(__import__("shapely").Point(pt)) < 0.3]
+    assert len(near) >= 3

@@ -129,7 +129,7 @@ LABEL_DEPTH_MM = 0.6
 FIELD_GAP_MM = 0.45          # ground left between two fields (the line that tells them apart)
 ROW_DEPTH_MM = 0.2            # crop rows engraved this deep
 TERRAIN_TOL_MM = 0.02         # how far the simplified terrain may stray from the elevation grid
-STAGE_VERSION = 11             # bump when the gathered map data changes shape
+STAGE_VERSION = 12             # bump when the gathered map data changes shape
 STAGE_MAX_AGE_S = 7 * 86400
 PLAQUE_MM = 0.6               # the plaque's letters stand this high (and sink as deep into the frame)
 SINGLE = "_single"            # key of the one-piece twin kept beside the colour parts
@@ -1446,7 +1446,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
     fine = p.tree_size_mm / k <= 16.0          # a single tree is still a tree on the model (finer than about 1:15.000)
     want_canopy = p.trees and p.tree_source == "auto" and fine and hasattr(sources, "canopy")
     if p.trees and (want_canopy or feats.trees or feats.tree_rows or feats.woods is not None or feats.parks is not None
-                    or photo_woods is not None):
+                    or photo_woods is not None or feats.laser_trees or (fine and feats.hedges)):
         clock.step(0.62, "Trees")
         crown = p.tree_size_mm
         kv = k * p.building_exag
@@ -1471,7 +1471,7 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
                 d, _ = tree_idx.query(np.column_stack([px, py]))
                 ok = d >= np.maximum(F[:, 3] * k, crown) * 0.6
             for i in np.nonzero(ok)[0]:
-                mapped.append((px[i], py[i], F[i, 3] * k, F[i, 2] * kv, -1))
+                mapped.append((px[i], py[i], F[i, 3] * k, F[i, 2] * kv, int(F[i, 4]) if F.shape[1] > 4 else -1))
             if ok.any():
                 trees_from.append(label)
             return int(ok.sum())
@@ -1513,11 +1513,15 @@ def build(params: ModelParams, sources: Any, *, progress: Optional[Progress] = N
         blocked_light = shapely.union_all(np.array([g.buffer(crown * 0.2) for g in light], dtype=object)) if light else None
         clip = lambda g: g.intersection(model_box) if g is not None and not g.is_empty else None  # noqa: E731
         seed = int(abs(p.lon * 1e5) + abs(p.lat * 1e5)) % (2 ** 32)
+        # hedges (mapped with the fields) as rows of bushes, as long as there are not so many they would bury the fields
+        hedge_rows = [g for g in (to_mm(l) for l in feats.hedges) if g is not None] if fine else []
+        if sum(g.length for g in hedge_rows) / (crown * 0.9) > 15000:
+            hedge_rows = []
         woods_mm = to_mm(feats.woods) if feats.woods is not None else None
         if photo_woods is not None:
             woods_mm = photo_woods if woods_mm is None else woods_mm.union(photo_woods)
         P, R, TH, TK = detail.plant(woods=clip(woods_mm), parks=clip(to_mm(feats.parks)), mapped=mapped,
-                                    rows=[to_mm(l) for l in feats.tree_rows], blocked=blocked, blocked_light=blocked_light,
+                                    rows=[to_mm(l) for l in feats.tree_rows] + hedge_rows, blocked=blocked, blocked_light=blocked_light,
                                     inside=footprint.buffer(-crown * 0.6), crown_mm=crown,
                                     density=p.tree_density, rng=np.random.default_rng(seed),
                                     scatter_parks=not seen_from_air, scatter_woods=not seen_from_air,

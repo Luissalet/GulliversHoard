@@ -808,8 +808,8 @@ def trees(heights: np.ndarray, bounds: tuple[float, float, float, float], projec
           *, is_ndsm: bool = False, buildings: Any = None, cell_m: float = 1.0, min_height_m: float = 3.0,
           ground_window_m: float = 24.0, min_rough_m: float = 0.35, max_trees: int = 60000
           ) -> list[tuple[float, float, float, float]]:
-    """The trees the laser saw: [(x, y, height_m, crown_m)] in metres of ``projector`` inside ``area_m`` (minx, miny, maxx,
-    maxy), one per crown, highest first.
+    """The trees the laser saw: [(x, y, height_m, crown_m, kind)] in metres of ``projector`` inside ``area_m`` (minx, miny,
+    maxx, maxy), one per crown, highest first; kind 1 a conifer, 0 broad-leaved, -1 unknown (``crown_kinds``).
 
     Height above ground: the model itself for an nDSM; otherwise the model minus its ground, the lowest value within
     ``ground_window_m`` smoothed over the same window (the street between the trees, the floor of a clearing). Buildings
@@ -842,7 +842,8 @@ def trees(heights: np.ndarray, bounds: tuple[float, float, float, float], projec
         T = Affine(cell_m, 0.0, minx, 0.0, -cell_m, maxy)
         mask = rasterio.features.rasterize([(buildings.buffer(2.0), 1)], out_shape=(H, W), transform=T, fill=0, dtype="uint8")
         rel[mask.astype(bool)] = 0.0
-    rel = ndimage.median_filter(rel, size=3)                        # lamp posts, wires, single noisy cells
+    med = ndimage.median_filter(rel, size=3)
+    rel = np.where(med >= 0.4 * rel, rel, med)                     # lamp posts, wires, lone cells; not a fir's tip
     f = ndimage.gaussian_filter(rel, sigma=max(0.6, 1.0 / cell_m))
     window = max(3, int(round(3.0 / cell_m)) | 1)
     peaks = (f == ndimage.maximum_filter(f, size=window)) & (f >= min_height_m)
@@ -873,4 +874,50 @@ def trees(heights: np.ndarray, bounds: tuple[float, float, float, float], projec
     X = minx + (xs[keep] + 0.5) * cell_m
     Y = maxy - (ys[keep] + 0.5) * cell_m
     ht = hts[keep]
-    return [(float(a), float(b), round(float(t), 2), float(c)) for a, b, t, c in zip(X, Y, ht, canopy_mod.crown_m(ht))]
+    guess = canopy_mod.crown_m(ht)
+    crowns = crown_widths(rel, ys[keep], xs[keep], ht, cell_m, guess)
+    kinds = crown_kinds(rel, ys[keep], xs[keep], ht, np.maximum(crowns, guess), cell_m)
+    return [(float(a), float(b), round(float(t), 2), float(c), int(k))
+            for a, b, t, c, k in zip(X, Y, ht, crowns, kinds)]
+
+
+def crown_widths(rel: np.ndarray, rows: np.ndarray, cols: np.ndarray, tops: np.ndarray, cell_m: float,
+                 guess: np.ndarray) -> np.ndarray:
+    """The width of each crown as the laser saw it: twice the distance at which the heights around its top fall below a
+    quarter of it (median of 12 directions), between 2 and 18 m; the ``guess`` (from the height) where that cannot be
+    seen."""
+    out = np.asarray(guess, dtype=float).copy()
+    h, w = rel.shape
+    ang = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+    sin, cos = np.sin(ang), np.cos(ang)
+    steps = np.arange(1, int(10.0 / cell_m) + 1)
+    for i, (r, c, top) in enumerate(zip(rows, cols, tops)):
+        if top <= 0:
+            continue
+        rr = np.clip(np.round(r + steps[:, None] * sin[None, :]).astype(int), 0, h - 1)
+        cc = np.clip(np.round(c + steps[:, None] * cos[None, :]).astype(int), 0, w - 1)
+        below = rel[rr, cc] < 0.25 * top                                  # steps x directions
+        first = np.where(below.any(axis=0), below.argmax(axis=0), -1)
+        seen = first[first >= 0]
+        if len(seen) >= 6:
+            out[i] = float(np.clip(2.0 * (np.median(seen) + 0.5) * cell_m, 2.0, 18.0))
+    return out
+
+
+def crown_kinds(rel: np.ndarray, rows: np.ndarray, cols: np.ndarray, tops: np.ndarray, crowns: np.ndarray, cell_m: float,
+                pointed: float = 0.2) -> np.ndarray:
+    """Conifer (1), broad-leaved (0) or unknown (-1) for each crown, by its shape: a cone falls away fast from its tip
+    (at a quarter of its width it is already a fifth lower), a rounded crown hardly drops there. Unknown when the crown
+    is under four cells across (too coarse to tell)."""
+    out = np.full(len(rows), -1, dtype=int)
+    h, w = rel.shape
+    for i, (r, c, top, cr) in enumerate(zip(rows, cols, tops, crowns)):
+        d_px = 0.25 * cr / cell_m
+        if cr / cell_m < 4.0 or top <= 0:
+            continue
+        ang = np.linspace(0, 2 * np.pi, 12, endpoint=False)
+        rr = np.clip(np.round(r + d_px * np.sin(ang)).astype(int), 0, h - 1)
+        cc = np.clip(np.round(c + d_px * np.cos(ang)).astype(int), 0, w - 1)
+        drop = (top - float(np.median(rel[rr, cc]))) / top
+        out[i] = 1 if drop >= pointed else 0
+    return out
