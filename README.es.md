@@ -1,3 +1,7 @@
+> **Absorbido por [Vulcan's Hoard](https://github.com/Luissalet/VulcanHoard).**
+> Las funciones de este proyecto se mantienen en el Hoard fusionado, con módulos independientes y apagados inicialmente.
+> El código y las instrucciones siguientes se conservan como referencia histórica; usa el repositorio enlazado para la instalación actual.
+
 # Gulliver's Hoard
 
 Las guías de montaje utilizan las bases de los STL originales, la miniatura, los archivos y el perfil guardado de una generación. En el visor, abre **Guía de montaje**, elige la generación y prepara su plano numerado con el norte arriba. El HTML autónomo se descarga, imprime o guarda en PDF desde el navegador. Enumera STL/3MF, dimensiones, ajuste a la cama y colores/materiales; los cuadros enmarcados se mantienen independientes. Solo menciona la marca inferior si los parámetros guardados la confirman. El diámetro y la longitud de los pines son los de esa generación; sus posiciones no se dibujan. Las versiones antiguas sin parámetros conservan el plano real de la base y los archivos, declarando desconocidos los pines y las marcas. `model_assembly` se consulta por páginas (`next_offset`); `model_assembly_export` crea HTML/SVG. Las guías generadas también aparecen en los archivos y en la exportación normal, sin reescribir mallas ni informes anteriores.

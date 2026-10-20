@@ -1,3 +1,7 @@
+> **Absorbed by [Vulcan's Hoard](https://github.com/Luissalet/VulcanHoard).**
+> This project's capabilities are maintained in the merged Hoard, with independent modules initially disabled.
+> The code and instructions below remain as historical reference; use the linked repository for the current installation.
+
 # Gulliver's Hoard
 
 Assembly guides use a kept build's original STL bases, thumbnail, files and saved printer/material snapshot. In the model viewer, expand **Assembly guide**, choose the build and prepare its numbered north-up plan. The self-contained HTML can be downloaded, printed or saved as PDF through the browser. It lists matching STL/3MF names, dimensions, bed fit and material colours; separated framed panels stay independent. Underside engraving is mentioned only when the saved parameters confirm it. Pin diameter/cut length come from that generation; their positions are not drawn. Older exports without parameter snapshots still give the actual base plan and files, with unknown pin/label settings stated. Read pages through `model_assembly` (`next_offset`); create HTML/SVG with `model_assembly_export`. Generated guides also join the ordinary file/export list without rewriting old meshes or reports.
